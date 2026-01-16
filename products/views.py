@@ -1,16 +1,25 @@
+import logging
+import uuid
+
+from botocore.exceptions import ClientError
+from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 
-from .models import Product
+from .models import Product, ProductImage
+from .s3_utils import generate_presigned_put_url, get_public_url, delete_s3_object
 from .serializers import (
     ProductCreateUpdateSerializer,
     ProductListSerializer,
     ProductDetailSerializer,
+    ProductImageCreateSerializer
 )
 from users.permissions import IsSeller
 from rest_framework.permissions import AllowAny
+
+logger = logging.getLogger(__name__)
 
 
 class SellerProductListCreateView(APIView):
@@ -32,7 +41,11 @@ class SellerProductDetailView(APIView):
     permission_classes = [IsSeller]
 
     def get_object(self, request, pk):
-        return get_object_or_404(Product, pk=pk, seller=request.user)
+        return get_object_or_404(
+            Product.objects.select_related("category").prefetch_related("images"),
+            pk=pk,
+            seller=request.user,
+        )
 
     def get(self, request, pk):
         product = self.get_object(request, pk)
@@ -67,6 +80,106 @@ class PublicProductDetailView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, pk):
-        product = get_object_or_404(Product, pk=pk, is_active=True)
+        product = get_object_or_404(
+            Product.objects.select_related("category").prefetch_related("images"),
+            pk=pk,
+            is_active=True,
+        )
         serializer = ProductDetailSerializer(product)
         return Response(serializer.data)
+
+
+class SellerProductImageCreateView(APIView):
+    permission_classes = [IsSeller]
+
+    def post(self, request, product_id):
+        product = get_object_or_404(
+            Product,
+            id=product_id,
+            seller=request.user
+        )
+
+        serializer = ProductImageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        is_first = not product.images.exists()
+        product_image = ProductImage.objects.create(
+            product=product,
+            image_url=serializer.validated_data["image_url"],
+            is_thumbnail=is_first,
+        )
+
+        response_serializer = ProductImageCreateSerializer(product_image)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class SellerProductImagePresignView(APIView):
+    permission_classes = [IsSeller]
+
+    def post(self, request, product_id):
+        get_object_or_404(Product, id=product_id, seller=request.user)
+
+        file_name = request.data.get("file_name")
+        if not file_name:
+            return Response(
+                {"file_name": ["This field is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        key = f"products/{product_id}/{uuid.uuid4().hex}.webp"
+        upload_url = generate_presigned_put_url(key)
+        file_url = get_public_url(key)
+
+        return Response({"upload_url": upload_url, "file_url": file_url})
+
+
+class SellerProductImageThumbnailView(APIView):
+    permission_classes = [IsSeller]
+
+    def patch(self, request, product_id, image_id):
+        image = get_object_or_404(
+            ProductImage,
+            id=image_id,
+            product_id=product_id,
+            product__seller=request.user,
+        )
+
+        with transaction.atomic():
+            ProductImage.objects.filter(product_id=product_id).update(is_thumbnail=False)
+            image.is_thumbnail = True
+            image.save(update_fields=["is_thumbnail"])
+
+        return Response({"status": "ok"})
+
+
+class SellerProductImageDeleteView(APIView):
+    permission_classes = [IsSeller]
+
+    def delete(self, request, product_id, image_id):
+        image = get_object_or_404(
+            ProductImage,
+            id=image_id,
+            product_id=product_id,
+            product__seller=request.user,
+        )
+
+        was_thumbnail = image.is_thumbnail
+        product_id_ref = image.product_id
+
+        try:
+            delete_s3_object(image.image_url)
+        except ClientError:
+            logger.warning("Failed to delete S3 object: %s", image.image_url, exc_info=True)
+
+        image.delete()
+
+        if was_thumbnail:
+            next_image = ProductImage.objects.filter(product_id=product_id_ref).first()
+            if next_image:
+                next_image.is_thumbnail = True
+                next_image.save(update_fields=["is_thumbnail"])
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

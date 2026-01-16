@@ -3,10 +3,11 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 
-from .models import Product
+from .models import Product, ProductImage
 from .serializers import (
     ProductCreateUpdateSerializer,
     ProductListSerializer,
+    ProductImageCreateSerializer
 )
 from users.permissions import IsSeller
 from rest_framework.permissions import AllowAny
@@ -57,3 +58,31 @@ class PublicProductListView(APIView):
         products = Product.objects.filter(is_active=True).order_by("-created_at")
         serializer = ProductListSerializer(products, many=True)
         return Response(serializer.data)
+
+class SellerProductImageCreateView(APIView):
+    permission_classes = [IsSeller]
+
+    def post(self, request, product_id):
+        product = get_object_or_404(
+            Product,
+            id=product_id,
+            seller=request.user
+        )
+
+        serializer = ProductImageCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            product_image = ProductImage.objects.create(
+                product=product,
+                image_url=serializer.validated_data["image_url"]
+            )
+
+            response_serializer = ProductImageCreateSerializer(product_image)
+            return Response(
+                response_serializer.data,
+                status=status.HTTP_201_CREATED
+            )
+
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )

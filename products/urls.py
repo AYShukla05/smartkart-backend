@@ -3,6 +3,7 @@ from .views import (
     SellerProductListCreateView,
     SellerProductDetailView,
     PublicProductListView,
+    SellerProductImageCreateView
 )
 
 urlpatterns = [
@@ -12,4 +13,5 @@ urlpatterns = [
     # Seller
     path("my/", SellerProductListCreateView.as_view()),
     path("my/<int:pk>/", SellerProductDetailView.as_view()),
+    path("my/<int:product_id>/images/", SellerProductImageCreateView.as_view()),
 ]

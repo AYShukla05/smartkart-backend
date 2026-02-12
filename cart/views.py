@@ -38,16 +38,30 @@ class CartItemAddView(APIView):
         product = get_object_or_404(Product, id=serializer.validated_data["product_id"])
         quantity = serializer.validated_data["quantity"]
 
-        cart_item, created = CartItem.objects.get_or_create(
-            cart=cart,
-            product=product,
-            defaults={"quantity": quantity},
-        )
+        existing_item = CartItem.objects.filter(cart=cart, product=product).first()
+        existing_qty = existing_item.quantity if existing_item else 0
 
-        if not created:
-            cart_item.quantity = F("quantity") + quantity
-            cart_item.save(update_fields=["quantity"])
-            cart_item.refresh_from_db()
+        if existing_qty + quantity > product.stock:
+            available = product.stock - existing_qty
+            detail = f"Only {product.stock} units available."
+            if existing_qty > 0:
+                detail = f"Only {available} more can be added. You already have {existing_qty} in cart."
+            return Response(
+                {"detail": detail},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if existing_item:
+            existing_item.quantity = F("quantity") + quantity
+            existing_item.save(update_fields=["quantity"])
+            existing_item.refresh_from_db()
+            cart_item = existing_item
+        else:
+            cart_item = CartItem.objects.create(
+                cart=cart,
+                product=product,
+                quantity=quantity,
+            )
 
         response_serializer = CartItemReadSerializer(cart_item)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
@@ -65,7 +79,14 @@ class CartItemDetailView(APIView):
         serializer = CartItemCreateUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        cart_item.quantity = serializer.validated_data["quantity"]
+        new_quantity = serializer.validated_data["quantity"]
+        if new_quantity > cart_item.product.stock:
+            return Response(
+                {"detail": f"Only {cart_item.product.stock} units available."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cart_item.quantity = new_quantity
         cart_item.save(update_fields=["quantity"])
 
         response_serializer = CartItemReadSerializer(cart_item)

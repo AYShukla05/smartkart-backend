@@ -8,8 +8,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 
+from django.db.models import Q
 from .models import Product, ProductImage
 from .s3_utils import generate_presigned_put_url, get_public_url, delete_s3_object
+from smartkart.pagination import ProductPagination
 from .serializers import (
     ProductCreateUpdateSerializer,
     ProductListSerializer,
@@ -26,9 +28,28 @@ class SellerProductListCreateView(APIView):
     permission_classes = [IsSeller]
 
     def get(self, request):
-        products = Product.objects.filter(seller=request.user).order_by("-created_at")
-        serializer = ProductListSerializer(products, many=True)
-        return Response(serializer.data)
+        queryset = Product.objects.filter(
+            seller=request.user
+        ).select_related("category").prefetch_related("images")
+
+        search = request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+
+        allowed_orderings = {
+            "price", "-price", "name", "-name", "stock", "-stock", "created_at", "-created_at"
+        }
+        ordering = request.query_params.get("ordering", "-created_at")
+        if ordering not in allowed_orderings:
+            ordering = "-created_at"
+        queryset = queryset.order_by(ordering)
+
+        paginator = ProductPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = ProductListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
         serializer = ProductCreateUpdateSerializer(data=request.data)
@@ -71,9 +92,32 @@ class PublicProductListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        products = Product.objects.filter(is_active=True).order_by("-created_at")
-        serializer = ProductListSerializer(products, many=True)
-        return Response(serializer.data)
+        queryset = Product.objects.filter(
+            is_active=True
+        ).select_related("category").prefetch_related("images")
+
+        search = request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+
+        category = request.query_params.get("category")
+        if category:
+            queryset = queryset.filter(category_id=category)
+
+        allowed_orderings = {
+            "price", "-price", "name", "-name", "created_at", "-created_at"
+        }
+        ordering = request.query_params.get("ordering", "-created_at")
+        if ordering not in allowed_orderings:
+            ordering = "-created_at"
+        queryset = queryset.order_by(ordering)
+
+        paginator = ProductPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = ProductListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 class PublicProductDetailView(APIView):

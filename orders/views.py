@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Count, F, Prefetch, Sum
 
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
@@ -9,6 +9,7 @@ from rest_framework import status
 from cart.models import CartItem
 from products.models import Product
 from users.permissions import IsBuyer, IsSeller
+from smartkart.pagination import OrderPagination
 
 from .models import Order, OrderItem
 from .serializers import OrderReadSerializer, SellerOrderReadSerializer
@@ -101,15 +102,17 @@ class BuyerOrderListView(APIView):
     permission_classes = [IsBuyer]
 
     def get(self, request):
-        orders = (
+        queryset = (
             Order.objects
             .filter(buyer=request.user)
             .prefetch_related("items", "items__product")
             .order_by("-created_at")
         )
 
-        serializer = OrderReadSerializer(orders, many=True)
-        return Response(serializer.data)
+        paginator = OrderPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = OrderReadSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
     
 class BuyerOrderDetailView(APIView):
     permission_classes = [IsBuyer]
@@ -127,7 +130,7 @@ class SellerOrderListView(APIView):
     permission_classes = [IsSeller]
 
     def get(self, request):
-        orders = (
+        queryset = (
             Order.objects
             .filter(items__seller=request.user)
             .distinct()
@@ -142,9 +145,32 @@ class SellerOrderListView(APIView):
             .order_by("-created_at")
         )
 
+        paginator = OrderPagination()
+        page = paginator.paginate_queryset(queryset, request)
         serializer = SellerOrderReadSerializer(
-            orders,
+            page,
             many=True,
             context={"seller": request.user}
         )
-        return Response(serializer.data)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class SellerStatsView(APIView):
+    permission_classes = [IsSeller]
+
+    def get(self, request):
+        order_stats = (
+            OrderItem.objects
+            .filter(seller=request.user)
+            .aggregate(
+                total_orders=Count("order", distinct=True),
+                total_revenue=Sum(F("price_at_purchase") * F("quantity")),
+            )
+        )
+        total_products = Product.objects.filter(seller=request.user).count()
+
+        return Response({
+            "total_orders": order_stats["total_orders"] or 0,
+            "total_revenue": str(order_stats["total_revenue"] or 0),
+            "total_products": total_products,
+        })

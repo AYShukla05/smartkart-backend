@@ -46,13 +46,14 @@ INSTALLED_APPS = [
     "corsheaders",
     "drf_spectacular",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "authentication",
     "users",
     "categories",
     "products",
     "cart",
     "orders",
-    
+
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -159,6 +160,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/minute",
         "user": "120/minute",
+        "auth": "10/minute",
     },
 }
 
@@ -174,6 +176,7 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
 
     "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 

@@ -66,6 +66,12 @@ class CheckoutView(APIView):
                     "price_at_purchase": product.price,
                 })
 
+            if not order_items_data:
+                return Response(
+                    {"detail": "Cart is empty."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             # Create Order
             order = Order.objects.create(
                 buyer=request.user,

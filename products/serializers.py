@@ -63,6 +63,7 @@ class ProductImageCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
         fields = ["id", "image_url", "is_thumbnail"]
+        read_only_fields = ["is_thumbnail"]
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):

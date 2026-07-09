@@ -10,7 +10,13 @@ from django.shortcuts import get_object_or_404
 
 from django.db.models import Q
 from .models import Product, ProductImage
-from .s3_utils import generate_presigned_put_url, get_public_url, delete_s3_object
+from .s3_utils import (
+    generate_presigned_put_url,
+    get_public_url,
+    delete_s3_object,
+    get_s3_key_from_url,
+    S3UploadError,
+)
 from smartkart.pagination import ProductPagination
 from .serializers import (
     ProductCreateUpdateSerializer,
@@ -146,10 +152,18 @@ class SellerProductImageCreateView(APIView):
         serializer = ProductImageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        image_url = serializer.validated_data["image_url"]
+        key = get_s3_key_from_url(image_url)
+        if not key or not key.startswith(f"products/{product.id}/"):
+            return Response(
+                {"image_url": ["This image was not uploaded for this product."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         is_first = not product.images.exists()
         product_image = ProductImage.objects.create(
             product=product,
-            image_url=serializer.validated_data["image_url"],
+            image_url=image_url,
             is_thumbnail=is_first,
         )
 
@@ -173,8 +187,21 @@ class SellerProductImagePresignView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        allowed_extensions = (".jpg", ".jpeg", ".png", ".webp")
+        if not file_name.lower().endswith(allowed_extensions):
+            return Response(
+                {"file_name": ["Unsupported file type. Allowed types: jpg, jpeg, png, webp."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         key = f"products/{product_id}/{uuid.uuid4().hex}.webp"
-        upload_url = generate_presigned_put_url(key)
+        try:
+            upload_url = generate_presigned_put_url(key)
+        except S3UploadError:
+            return Response(
+                {"detail": "Image upload service unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         file_url = get_public_url(key)
 
         return Response({"upload_url": upload_url, "file_url": file_url})

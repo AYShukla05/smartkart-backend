@@ -40,6 +40,8 @@ class SellerOrderReadSerializer(serializers.ModelSerializer):
         )
 
     def get_items(self, order):
-        seller = self.context.get("seller")
-        items = order.items.filter(seller=seller) if seller else order.items.all()
+        # When a seller is in context, the view already scopes the "items"
+        # Prefetch queryset to that seller - call .all() (not .filter()) so
+        # this hits the prefetch cache instead of issuing a fresh query.
+        items = order.items.all()
         return OrderItemReadSerializer(items, many=True).data

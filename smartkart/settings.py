@@ -14,10 +14,17 @@ from pathlib import Path
 import os
 from datetime import timedelta
 import dj_database_url
+from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Loads .env into the process environment regardless of shell (bash, PowerShell,
+# cmd, whatever). python-dotenv was already a dependency but never actually
+# called anywhere - meaning every local run only worked if you'd manually
+# exported the .env values into that shell session yourself beforehand.
+load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -53,7 +60,7 @@ INSTALLED_APPS = [
     "products",
     "cart",
     "orders",
-
+    "seeding",
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -201,6 +208,10 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "smartkart-images")
 AWS_S3_REGION = os.getenv("AWS_S3_REGION", "ap-south-1")
+
+# Pexels API (used only by the seeding management command, to build a
+# realistic, category-searchable stock-photo pool - not used by the app itself)
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
 # Production security settings
 if not DEBUG:

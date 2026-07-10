@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    AdminProductListView,
     SellerProductListCreateView,
     SellerProductDetailView,
     PublicProductListView,
@@ -11,6 +12,9 @@ from .views import (
 )
 
 urlpatterns = [
+    # Admin
+    path("admin/", AdminProductListView.as_view()),
+
     # Public
     path("", PublicProductListView.as_view()),
     path("<int:pk>/", PublicProductDetailView.as_view()),

@@ -17,14 +17,15 @@ from .s3_utils import (
     get_s3_key_from_url,
     S3UploadError,
 )
-from smartkart.pagination import ProductPagination
+from smartkart.pagination import AdminProductPagination, ProductPagination
 from .serializers import (
+    AdminProductListSerializer,
     ProductCreateUpdateSerializer,
     ProductListSerializer,
     ProductDetailSerializer,
     ProductImageCreateSerializer
 )
-from users.permissions import IsSeller
+from users.permissions import IsAdmin, IsSeller
 from rest_framework.permissions import AllowAny
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,45 @@ class PublicProductListView(APIView):
         paginator = ProductPagination()
         page = paginator.paginate_queryset(queryset, request)
         serializer = ProductListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class AdminProductListView(APIView):
+    """Read-only, platform-wide product listing for admins - every product
+    regardless of seller or is_active, unlike the public/seller-scoped views."""
+
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        queryset = Product.objects.select_related(
+            "category", "seller"
+        ).prefetch_related("images")
+
+        search = request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(seller__email__icontains=search)
+            )
+
+        category = request.query_params.get("category")
+        if category:
+            queryset = queryset.filter(category_id=category)
+
+        is_active = request.query_params.get("is_active")
+        if is_active in ("true", "false"):
+            queryset = queryset.filter(is_active=(is_active == "true"))
+
+        allowed_orderings = {
+            "price", "-price", "name", "-name", "created_at", "-created_at", "stock", "-stock"
+        }
+        ordering = request.query_params.get("ordering", "-created_at")
+        if ordering not in allowed_orderings:
+            ordering = "-created_at"
+        queryset = queryset.order_by(ordering)
+
+        paginator = AdminProductPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = AdminProductListSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
 

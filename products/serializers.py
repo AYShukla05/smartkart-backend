@@ -59,6 +59,20 @@ class ProductListSerializer(serializers.ModelSerializer):
             thumb = images[0]
         return thumb.image_url if thumb else None
 
+
+class AdminProductListSerializer(ProductListSerializer):
+    """Same as ProductListSerializer, plus the seller's email - safe to
+    expose here since this endpoint is IsAdmin-gated, unlike the public
+    listing this class extends, which must never leak seller emails to
+    anonymous visitors."""
+
+    seller_email = serializers.CharField(source="seller.email", read_only=True)
+
+    class Meta(ProductListSerializer.Meta):
+        fields = ProductListSerializer.Meta.fields + ["seller_email"]
+        # get_thumbnail is inherited from ProductListSerializer - no need to redefine it.
+
+
 class ProductImageCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage

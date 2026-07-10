@@ -8,11 +8,11 @@ from rest_framework import status
 
 from cart.models import CartItem
 from products.models import Product
-from users.permissions import IsBuyer, IsSeller
-from smartkart.pagination import OrderPagination
+from users.permissions import IsAdmin, IsBuyer, IsSeller
+from smartkart.pagination import AdminOrderPagination, OrderPagination
 
 from .models import Order, OrderItem
-from .serializers import OrderReadSerializer, SellerOrderReadSerializer
+from .serializers import AdminOrderReadSerializer, OrderReadSerializer, SellerOrderReadSerializer
 
 
 class CheckoutView(APIView):
@@ -158,6 +158,39 @@ class SellerOrderListView(APIView):
             many=True,
             context={"seller": request.user}
         )
+        return paginator.get_paginated_response(serializer.data)
+
+
+class AdminOrderListView(APIView):
+    """Read-only, platform-wide order listing for admins - every order
+    regardless of buyer, with every line item regardless of seller."""
+
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        queryset = (
+            Order.objects
+            .select_related("buyer")
+            .prefetch_related(
+                Prefetch(
+                    "items",
+                    queryset=OrderItem.objects.select_related("product", "seller"),
+                )
+            )
+            .order_by("-created_at")
+        )
+
+        status_param = request.query_params.get("status")
+        if status_param in (Order.Status.PLACED, Order.Status.CANCELLED):
+            queryset = queryset.filter(status=status_param)
+
+        search = request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(buyer__email__icontains=search)
+
+        paginator = AdminOrderPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = AdminOrderReadSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
 

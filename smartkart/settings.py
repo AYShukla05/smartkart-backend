@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     "cart",
     "orders",
     "seeding",
+    "ai",
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -168,6 +169,7 @@ REST_FRAMEWORK = {
         "anon": "60/minute",
         "user": "120/minute",
         "auth": "10/minute",
+        "ai_generate": "10/minute",
     },
 }
 
@@ -212,6 +214,9 @@ AWS_S3_REGION = os.getenv("AWS_S3_REGION", "ap-south-1")
 # Pexels API (used only by the seeding management command, to build a
 # realistic, category-searchable stock-photo pool - not used by the app itself)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+
+# Anthropic API (used only by ai/services/llm_client.py)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Production security settings
 if not DEBUG:

@@ -266,6 +266,7 @@ class BackfillDescriptionsCommandTests(TestCase):
         for product in self.products:
             product.refresh_from_db()
             self.assertEqual(product.description, "Generated.")
+            self.assertEqual(product.seo_keywords, ["k"])
         self.assertEqual(mock_generate.call_count, 5)
 
     @patch("ai.management.commands.backfill_descriptions.time.sleep")

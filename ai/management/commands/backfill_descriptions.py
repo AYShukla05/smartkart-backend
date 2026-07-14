@@ -92,4 +92,5 @@ class Command(BaseCommand):
         raw = generate(prompt, system=DESCRIPTION_SYSTEM_PROMPT, model=MODEL)
         parsed = parse_description_json(raw)
         product.description = parsed["description"]
-        product.save(update_fields=["description"])
+        product.seo_keywords = parsed["seo_keywords"]
+        product.save(update_fields=["description", "seo_keywords"])

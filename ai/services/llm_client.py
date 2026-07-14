@@ -1,12 +1,16 @@
 import logging
 
 import anthropic
+import voyageai
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_TOKENS = 600
+
+DEFAULT_EMBEDDING_MODEL = "voyage-4-lite"
+DEFAULT_EMBEDDING_DIMENSIONS = 512
 
 
 class LLMGenerationError(Exception):
@@ -15,6 +19,10 @@ class LLMGenerationError(Exception):
 
 def _get_client():
     return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+
+def _get_voyage_client():
+    return voyageai.Client(api_key=settings.VOYAGE_API_KEY)
 
 
 def _build_system_param(system):
@@ -62,3 +70,30 @@ def stream(prompt, system=None, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKE
     except anthropic.APIError:
         logger.error("LLM stream() call failed", exc_info=True)
         raise LLMGenerationError("Failed to generate text.")
+
+
+def embed(text, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=DEFAULT_EMBEDDING_DIMENSIONS):
+    """Embed a single text string. Returns a list of floats (the vector).
+
+    input_type has no default and must be passed explicitly ("query" or
+    "document") - Voyage encodes these differently, and defaulting it
+    risks a call site silently embedding on the wrong side of that
+    asymmetry with no error, just worse ranking.
+    """
+    return embed_batch([text], input_type=input_type, model=model, dimensions=dimensions)[0]
+
+
+def embed_batch(texts, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=DEFAULT_EMBEDDING_DIMENSIONS):
+    """Embed multiple texts in a single API call. Returns a list of vectors,
+    one per input text, in the same order. Raises LLMGenerationError on failure."""
+    try:
+        result = _get_voyage_client().embed(
+            texts,
+            model=model,
+            input_type=input_type,
+            output_dimension=dimensions,
+        )
+        return result.embeddings
+    except voyageai.error.VoyageError:
+        logger.error("LLM embed_batch() call failed", exc_info=True)
+        raise LLMGenerationError("Failed to generate embeddings.")

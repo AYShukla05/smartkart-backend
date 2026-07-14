@@ -218,6 +218,9 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 # Anthropic API (used only by ai/services/llm_client.py)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# Voyage AI embeddings (used only by ai/services/llm_client.py)
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY")
+
 # Production security settings
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

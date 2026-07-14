@@ -42,6 +42,7 @@ class ProductListSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "description",
             "price",
             "stock",
             "is_active",

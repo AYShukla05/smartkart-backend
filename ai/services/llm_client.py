@@ -80,12 +80,18 @@ def embed(text, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=DEFAULT
     risks a call site silently embedding on the wrong side of that
     asymmetry with no error, just worse ranking.
     """
-    return embed_batch([text], input_type=input_type, model=model, dimensions=dimensions)[0]
+    vectors, _ = embed_batch([text], input_type=input_type, model=model, dimensions=dimensions)
+    return vectors[0]
 
 
 def embed_batch(texts, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=DEFAULT_EMBEDDING_DIMENSIONS):
-    """Embed multiple texts in a single API call. Returns a list of vectors,
-    one per input text, in the same order. Raises LLMGenerationError on failure."""
+    """Embed multiple texts in a single API call.
+
+    Returns (vectors, total_tokens): vectors is a list of embeddings, one
+    per input text, in the same order; total_tokens is Voyage's reported
+    usage for the call, for real (not estimated) cost tracking by callers
+    that index in bulk. Raises LLMGenerationError on failure.
+    """
     try:
         result = _get_voyage_client().embed(
             texts,
@@ -93,7 +99,7 @@ def embed_batch(texts, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=
             input_type=input_type,
             output_dimension=dimensions,
         )
-        return result.embeddings
+        return result.embeddings, result.total_tokens
     except voyageai.error.VoyageError:
         logger.error("LLM embed_batch() call failed", exc_info=True)
         raise LLMGenerationError("Failed to generate embeddings.")

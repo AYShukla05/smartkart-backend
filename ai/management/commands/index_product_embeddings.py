@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand
 
 from ai.models import ProductEmbedding
 from ai.services.llm_client import (
-    DEFAULT_EMBEDDING_DIMENSIONS,
+    CURRENT_EMBEDDING_MODEL_ID,
     DEFAULT_EMBEDDING_MODEL,
     LLMGenerationError,
     embed_batch,
@@ -14,7 +14,6 @@ from products.models import Product
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = f"{DEFAULT_EMBEDDING_MODEL}-{DEFAULT_EMBEDDING_DIMENSIONS}"
 PRICE_PER_MILLION_TOKENS = 0.02
 ESTIMATED_CHARS_PER_TOKEN = 4
 BATCH_SLEEP_SECONDS = 1
@@ -66,7 +65,7 @@ class Command(BaseCommand):
             already_indexed_count = 0
         else:
             already_indexed_ids = ProductEmbedding.objects.filter(
-                model_id=MODEL_ID
+                model_id=CURRENT_EMBEDDING_MODEL_ID
             ).values_list("product_id", flat=True)
             products = list(active_products.exclude(id__in=already_indexed_ids))
             already_indexed_count = active_products.count() - len(products)
@@ -145,6 +144,6 @@ class Command(BaseCommand):
         for product, vector in zip(batch, vectors):
             ProductEmbedding.objects.update_or_create(
                 product=product,
-                defaults={"embedding": vector, "model_id": MODEL_ID},
+                defaults={"embedding": vector, "model_id": CURRENT_EMBEDDING_MODEL_ID},
             )
         return total_tokens

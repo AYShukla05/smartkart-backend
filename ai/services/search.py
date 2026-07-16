@@ -26,6 +26,21 @@ RELEVANCE_THRESHOLD = 0.50
 MINIMUM_FLOOR = 24
 
 
+def _select_candidates(ranked):
+    """
+    Given ranked as a list of (id, distance) tuples sorted by distance
+    ascending, apply the floor/threshold/ceiling rule and return
+    (selected_ids, is_fallback, confident_count). Pure, no I/O - the actual
+    ranking needs Postgres, but this boundary logic doesn't, so it's unit
+    tested directly against hand-built ranked lists.
+    """
+    within_threshold = [pid for pid, distance in ranked if distance <= RELEVANCE_THRESHOLD]
+    confident_count = len(within_threshold)
+    is_fallback = confident_count < MINIMUM_FLOOR
+    selected_ids = [pid for pid, _ in ranked[:MINIMUM_FLOOR]] if is_fallback else within_threshold
+    return selected_ids, is_fallback, confident_count
+
+
 def semantic_search(query, category_id=None):
     """
     Embed the query and return (queryset, is_fallback, confident_count):
@@ -75,10 +90,7 @@ def semantic_search(query, category_id=None):
         ).order_by("distance")[:CANDIDATE_CEILING].values_list("id", "distance")
     )
 
-    within_threshold = [pid for pid, distance in ranked if distance <= RELEVANCE_THRESHOLD]
-    confident_count = len(within_threshold)
-    is_fallback = confident_count < MINIMUM_FLOOR
-    selected_ids = [pid for pid, _ in ranked[:MINIMUM_FLOOR]] if is_fallback else within_threshold
+    selected_ids, is_fallback, confident_count = _select_candidates(ranked)
 
     queryset = Product.objects.filter(
         id__in=selected_ids

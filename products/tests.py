@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -128,3 +129,96 @@ class PublicProductListTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertEqual(response.data["results"][0]["name"], "Active Phone")
+
+
+class SemanticSearchViewTestCase(TestCase):
+    """PublicProductListView's own orchestration around semantic_search() -
+    mocked here since the real ranking needs Postgres, this only tests the
+    view's decisions given controlled return values."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+        seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.electronics = Category.objects.create(name="Electronics", slug="electronics")
+        self.grocery = Category.objects.create(name="Grocery", slug="grocery")
+
+        self.laptop = Product.objects.create(
+            seller=seller, category=self.electronics, name="Laptop",
+            price=Decimal("50000.00"), stock=5, is_active=True,
+        )
+        self.coffee = Product.objects.create(
+            seller=seller, category=self.grocery, name="Coffee",
+            price=Decimal("300.00"), stock=5, is_active=True,
+        )
+
+    @patch("products.views.semantic_search")
+    def test_semantic_results_are_used_and_flags_propagate(self, mock_search):
+        mock_search.return_value = (Product.objects.filter(id=self.laptop.id).order_by("id"), False, 1)
+
+        response = self.client.get("/api/products/?search=laptop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_semantic"])
+        self.assertFalse(response.data["is_fallback"])
+        self.assertFalse(response.data["category_relaxed"])
+        self.assertEqual(response.data["confident_count"], 1)
+        names = [p["name"] for p in response.data["results"]]
+        self.assertEqual(names, ["Laptop"])
+
+    @patch("products.views.semantic_search")
+    def test_empty_semantic_result_falls_back_to_icontains(self, mock_search):
+        mock_search.return_value = (Product.objects.none(), True, 0)
+
+        response = self.client.get("/api/products/?search=Coffee")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["is_semantic"])
+        self.assertFalse(response.data["is_fallback"])
+        names = [p["name"] for p in response.data["results"]]
+        self.assertEqual(names, ["Coffee"])
+
+    @patch("products.views.semantic_search")
+    def test_category_scoped_empty_result_retries_catalog_wide(self, mock_search):
+        # First call (scoped to Grocery) finds nothing, second call (no
+        # category) finds the laptop instead.
+        mock_search.side_effect = [
+            (Product.objects.none(), True, 0),
+            (Product.objects.filter(id=self.laptop.id).order_by("id"), False, 1),
+        ]
+
+        response = self.client.get(f"/api/products/?search=laptop&category={self.grocery.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_semantic"])
+        self.assertTrue(response.data["category_relaxed"])
+        names = [p["name"] for p in response.data["results"]]
+        self.assertEqual(names, ["Laptop"])
+
+        self.assertEqual(mock_search.call_args_list[0].kwargs["category_id"], str(self.grocery.id))
+        self.assertIsNone(mock_search.call_args_list[1].kwargs["category_id"])
+
+    @patch("products.views.semantic_search")
+    def test_explicit_ordering_overrides_relevance(self, mock_search):
+        mock_search.return_value = (
+            Product.objects.filter(id__in=[self.laptop.id, self.coffee.id]), False, 2
+        )
+
+        response = self.client.get("/api/products/?search=x&ordering=price")
+
+        prices = [float(p["price"]) for p in response.data["results"]]
+        self.assertEqual(prices, sorted(prices))
+
+    @patch("products.views.semantic_search")
+    def test_no_explicit_ordering_keeps_relevance_order(self, mock_search):
+        # Ordered by -price, distinguishable from the default -created_at
+        # (which would put Coffee, created second, ahead of Laptop).
+        queryset = Product.objects.filter(id__in=[self.laptop.id, self.coffee.id]).order_by("-price")
+        mock_search.return_value = (queryset, False, 2)
+
+        response = self.client.get("/api/products/?search=x")
+
+        names = [p["name"] for p in response.data["results"]]
+        self.assertEqual(names, list(queryset.values_list("name", flat=True)))

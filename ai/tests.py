@@ -13,9 +13,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from categories.models import Category
 from products.models import Product
 from users.models import User
+from ai.models import ProductEmbedding
 from ai.parsers import DescriptionStreamParser, parse_description_json
 from ai.prompts import build_description_prompt
-from ai.services.llm_client import LLMGenerationError
+from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
+from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 
 
 def _fake_tokens():
@@ -219,6 +221,87 @@ class GenerateDescriptionViewTests(TestCase):
 
         second = self.client.post(self.url, self.payload, format="json")
         self.assertEqual(second.status_code, 429)
+
+
+class SelectCandidatesTests(TestCase):
+    """Pure boundary tests for the floor/threshold/ceiling selection rule -
+    the ranking itself needs Postgres, this arithmetic doesn't."""
+
+    def test_all_pass_threshold_above_floor_returns_unpadded(self):
+        ranked = [(i, 0.01 * i) for i in range(1, 30)]  # 29 items, all under 0.50
+        selected_ids, is_fallback, confident_count = _select_candidates(ranked)
+        self.assertFalse(is_fallback)
+        self.assertEqual(confident_count, 29)
+        self.assertEqual(selected_ids, list(range(1, 30)))
+
+    def test_none_pass_threshold_pads_to_floor(self):
+        ranked = [(i, 0.9) for i in range(1, 50)]  # all well over 0.50
+        selected_ids, is_fallback, confident_count = _select_candidates(ranked)
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 0)
+        self.assertEqual(selected_ids, list(range(1, MINIMUM_FLOOR + 1)))
+
+    def test_exactly_at_floor_is_not_fallback(self):
+        ranked = [(i, 0.1) for i in range(1, MINIMUM_FLOOR + 1)]  # exactly 24 passing
+        selected_ids, is_fallback, confident_count = _select_candidates(ranked)
+        self.assertFalse(is_fallback)
+        self.assertEqual(confident_count, MINIMUM_FLOOR)
+
+    def test_one_below_floor_pads_with_next_closest(self):
+        passing = [(i, 0.1) for i in range(1, MINIMUM_FLOOR)]  # 23 passing
+        padding = [(100 + i, 0.9) for i in range(5)]  # closest of the rest first
+        selected_ids, is_fallback, confident_count = _select_candidates(passing + padding)
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 23)
+        self.assertEqual(len(selected_ids), MINIMUM_FLOOR)
+        self.assertEqual(selected_ids[-1], 100)
+
+    def test_distance_exactly_at_threshold_counts_as_passing(self):
+        selected_ids, is_fallback, confident_count = _select_candidates([(1, RELEVANCE_THRESHOLD)])
+        self.assertEqual(confident_count, 1)
+
+    def test_fewer_candidates_than_floor_returns_all_of_them(self):
+        ranked = [(i, 0.9) for i in range(1, 6)]  # only 5 total candidates, none pass
+        selected_ids, is_fallback, confident_count = _select_candidates(ranked)
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 0)
+        self.assertEqual(selected_ids, [1, 2, 3, 4, 5])
+
+    def test_empty_ranked_list_returns_empty_fallback(self):
+        selected_ids, is_fallback, confident_count = _select_candidates([])
+        self.assertEqual(selected_ids, [])
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 0)
+
+
+class SemanticSearchEarlyReturnTests(TestCase):
+    """semantic_search()'s early-return paths never touch CosineDistance, so
+    unlike the ranking itself, they're safe to test directly against SQLite."""
+
+    def test_no_indexed_embeddings_returns_empty_fallback(self):
+        queryset, is_fallback, confident_count = semantic_search("anything")
+        self.assertEqual(list(queryset), [])
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 0)
+
+    @patch("ai.services.search.embed")
+    def test_embedding_failure_returns_empty_fallback(self, mock_embed):
+        seller = User.objects.create_user(
+            email="seller2@test.com", password="testpass123", role="SELLER"
+        )
+        category = Category.objects.create(name="Kitchen", slug="kitchen")
+        product = Product.objects.create(
+            seller=seller, category=category, name="Mug", price=Decimal("10.00"), stock=5,
+        )
+        ProductEmbedding.objects.create(
+            product=product, embedding=[0.0] * 512, model_id=CURRENT_EMBEDDING_MODEL_ID,
+        )
+        mock_embed.side_effect = LLMGenerationError("boom")
+
+        queryset, is_fallback, confident_count = semantic_search("anything")
+        self.assertEqual(list(queryset), [])
+        self.assertTrue(is_fallback)
+        self.assertEqual(confident_count, 0)
 
 
 class BackfillDescriptionsCommandTests(TestCase):

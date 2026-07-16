@@ -5,12 +5,12 @@ from pgvector.django import CosineDistance
 
 from ai.eval_data import EVAL_CASES
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError, embed
+from ai.services.search import CANDIDATE_CEILING
 from categories.models import Category
 from products.models import Product
 
 logger = logging.getLogger(__name__)
 
-CANDIDATE_CEILING = 144
 THRESHOLD_CANDIDATES = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
 DEFAULT_TOP_K = 10
 

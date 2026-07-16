@@ -17,6 +17,7 @@ from .s3_utils import (
     get_s3_key_from_url,
     S3UploadError,
 )
+from ai.services.search import semantic_search
 from smartkart.pagination import AdminProductPagination, ProductPagination
 from .serializers import (
     AdminProductListSerializer,
@@ -104,27 +105,75 @@ class PublicProductListView(APIView):
         ).select_related("category").prefetch_related("images")
 
         search = request.query_params.get("search", "").strip()
-        if search:
-            queryset = queryset.filter(
-                Q(name__icontains=search) | Q(description__icontains=search)
-            )
-
         category = request.query_params.get("category")
-        if category:
+
+        is_semantic = False
+        is_fallback = False
+        category_relaxed = False
+        confident_count = 0
+
+        if search:
+            semantic_results, fallback, confident_count = semantic_search(search, category_id=category)
+
+            if not semantic_results.exists() and category:
+                # Nothing ranked at all within the selected category (not just
+                # below threshold) - retry catalog-wide so a narrow category
+                # choice doesn't leave the buyer with a blank page.
+                semantic_results, fallback, confident_count = semantic_search(search, category_id=None)
+                category_relaxed = semantic_results.exists()
+
+            if semantic_results.exists():
+                queryset = semantic_results
+                is_semantic = True
+                is_fallback = fallback
+            else:
+                # Semantic search found nothing (not yet indexed, embedding
+                # API down, or genuinely no matches) - keyword search must
+                # still work, so fall back to it rather than show nothing.
+                queryset = queryset.filter(
+                    Q(name__icontains=search) | Q(description__icontains=search)
+                )
+                if category:
+                    queryset = queryset.filter(category_id=category)
+        elif category:
             queryset = queryset.filter(category_id=category)
 
         allowed_orderings = {
             "price", "-price", "name", "-name", "created_at", "-created_at"
         }
-        ordering = request.query_params.get("ordering", "-created_at")
-        if ordering not in allowed_orderings:
-            ordering = "-created_at"
-        queryset = queryset.order_by(ordering)
+        ordering = request.query_params.get("ordering")
+        if is_semantic and ordering not in allowed_orderings:
+            # No explicit sort requested - keep relevance ordering instead
+            # of forcing the default "-created_at" onto a search result.
+            pass
+        else:
+            queryset = queryset.order_by(ordering if ordering in allowed_orderings else "-created_at")
 
-        paginator = ProductPagination()
-        page = paginator.paginate_queryset(queryset, request)
-        serializer = ProductListSerializer(page, many=True)
-        return paginator.get_paginated_response(serializer.data)
+        if is_fallback:
+            # The floor-padded set is a small, fixed size by design (see
+            # MINIMUM_FLOOR in ai/services/search.py), not something meant
+            # to be paged through - paginating it would split a single
+            # coherent result (and the message explaining it) across a
+            # page boundary that has nothing to do with where confidence
+            # actually drops off.
+            serializer = ProductListSerializer(queryset, many=True)
+            response = Response({
+                "count": len(serializer.data),
+                "next": None,
+                "previous": None,
+                "results": serializer.data,
+            })
+        else:
+            paginator = ProductPagination()
+            page = paginator.paginate_queryset(queryset, request)
+            serializer = ProductListSerializer(page, many=True)
+            response = paginator.get_paginated_response(serializer.data)
+
+        response.data["is_semantic"] = is_semantic
+        response.data["is_fallback"] = is_fallback
+        response.data["category_relaxed"] = category_relaxed
+        response.data["confident_count"] = confident_count
+        return response
 
 
 class AdminProductListView(APIView):

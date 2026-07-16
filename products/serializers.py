@@ -37,6 +37,7 @@ class ProductListSerializer(serializers.ModelSerializer):
     seller_id = serializers.IntegerField(source="seller.id", read_only=True)
     seller_username = serializers.CharField(source="seller.username", read_only=True)
     thumbnail = serializers.SerializerMethodField()
+    distance = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -52,6 +53,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "seller_id",
             "seller_username",
             "thumbnail",
+            "distance",
         ]
 
     def get_thumbnail(self, obj):
@@ -60,6 +62,12 @@ class ProductListSerializer(serializers.ModelSerializer):
         if thumb is None and images:
             thumb = images[0]
         return thumb.image_url if thumb else None
+
+    def get_distance(self, obj):
+        # Only present when the queryset came from semantic_search(), which
+        # annotates it - None for keyword search, browsing, and admin/seller
+        # listings, since cosine distance is meaningless without a query vector.
+        return getattr(obj, "distance", None)
 
 
 class AdminProductListSerializer(ProductListSerializer):

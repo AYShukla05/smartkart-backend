@@ -9,8 +9,10 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from users.permissions import IsSeller
 from .parsers import DescriptionStreamParser
-from .prompts import DESCRIPTION_SYSTEM_PROMPT, build_description_prompt
+from .prompts import DESCRIPTION_SYSTEM_PROMPT, SELLER_ASSISTANT_SYSTEM_PROMPT, build_description_prompt
 from .services.llm_client import stream, LLMGenerationError
+from .services.tool_runner import run_with_tools
+from .tools.seller_tools import SELLER_TOOL_DEFINITIONS, SELLER_TOOL_EXECUTORS
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +78,27 @@ class GenerateDescriptionView(APIView):
         result = parser.finalize()
         yield f"data: [RESULT]{json.dumps(result)}\n\n"
         yield "data: [DONE]\n\n"
+
+
+class SellerAssistantView(APIView):
+    permission_classes = [IsSeller]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_seller_assistant"
+
+    def post(self, request):
+        question = str(request.data.get("question", "")).strip()
+        if not question:
+            return Response(
+                {"detail": "question is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        response_text = run_with_tools(
+            prompt=question,
+            system=SELLER_ASSISTANT_SYSTEM_PROMPT,
+            tool_definitions=SELLER_TOOL_DEFINITIONS,
+            tool_executors=SELLER_TOOL_EXECUTORS,
+            seller=request.user,
+            max_tool_calls=5,
+        )
+        return Response({"response": response_text})

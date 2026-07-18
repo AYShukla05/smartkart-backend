@@ -73,6 +73,27 @@ def stream(prompt, system=None, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKE
         raise LLMGenerationError("Failed to generate text.")
 
 
+def call_with_tools(messages, system, tools, model=DEFAULT_MODEL, max_tokens=1000):
+    """Make a single call to the model with tool definitions.
+
+    Returns the raw Anthropic API response object. Makes exactly one API
+    call - does not loop, does not execute tools, does not know what the
+    tools do. The caller inspects response.content blocks and decides
+    whether to execute tool calls or treat the response as final.
+    """
+    try:
+        return _get_client().messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=_build_system_param(system),
+            tools=tools,
+            messages=messages,
+        )
+    except anthropic.APIError:
+        logger.error("LLM call_with_tools() call failed", exc_info=True)
+        raise LLMGenerationError("Failed to call model with tools.")
+
+
 def embed(text, *, input_type, model=DEFAULT_EMBEDDING_MODEL, dimensions=DEFAULT_EMBEDDING_DIMENSIONS):
     """Embed a single text string. Returns a list of floats (the vector).
 

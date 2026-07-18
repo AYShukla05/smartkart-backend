@@ -22,6 +22,22 @@ A single order can contain products from multiple sellers. Each seller only sees
 
 ---
 
+## AI Features
+
+**AI Product Description Generator** - turns a name, category, and price into a complete listing; no seller copywriting required.
+- Title, description, bullet points, and SEO keywords generated in one pass
+- Streams token-by-token from Claude Haiku 4.5 (Anthropic, Server-Sent Events) - no blocking wait
+- Generated keywords persist and double as embedding input for semantic search - one AI call improves both the listing and its discoverability
+- Cost bounded by design: per-seller rate limit, hard token cap, and a batch-enrichment command that prices itself out before spending a cent
+
+**Semantic Search** - understands what a buyer means, not just what they typed.
+- "protect my phone screen from cracking" → screen protectors for phones and smartwatches as top confident matches, zero shared literal words (a keyword search on the same phrase returns nothing)
+- Voyage AI embeddings, ranked via pgvector's HNSW index (cosine similarity) at catalog scale, against a confidence threshold tuned empirically - not guessed
+- Confident and "related" results split visually instead of one undifferentiated list; a narrow query still returns a useful floor instead of a blank page
+- Zero matches in a chosen category retries catalog-wide automatically; keyword search takes over if embeddings are ever unavailable
+
+---
+
 ## Tech Stack
 
 | Layer | Technology | Why This Choice |

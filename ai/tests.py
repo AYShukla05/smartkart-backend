@@ -1,7 +1,8 @@
 import json
 from decimal import Decimal
 from io import StringIO
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
 from django.core.management import call_command
@@ -18,6 +19,20 @@ from ai.parsers import DescriptionStreamParser, parse_description_json
 from ai.prompts import build_description_prompt
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
+from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
+from ai.tools.seller_tools import SELLER_TOOL_EXECUTORS, generate_product_description, get_low_stock_products
+
+
+def _tool_use_block(name, input_, block_id="tool_1"):
+    return SimpleNamespace(type="tool_use", name=name, input=input_, id=block_id)
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_response(blocks):
+    return SimpleNamespace(content=blocks)
 
 
 def _fake_tokens():
@@ -373,3 +388,181 @@ class BackfillDescriptionsCommandTests(TestCase):
         ]
         self.assertEqual(descriptions.count("Generated."), 4)
         self.assertEqual(descriptions.count(""), 1)
+
+
+class SellerToolsTests(TestCase):
+    """Ownership scoping is a query-level guarantee, not a prompt instruction -
+    these test the executors directly, independent of the tool-calling loop."""
+
+    def setUp(self):
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.other_seller = User.objects.create_user(
+            email="other-seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.category = Category.objects.create(name="Kitchen", slug="kitchen")
+
+    def test_get_low_stock_products_excludes_other_sellers_products(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Mine Low",
+            price=Decimal("10.00"), stock=2,
+        )
+        Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs Low",
+            price=Decimal("10.00"), stock=1,
+        )
+
+        names = [p["name"] for p in get_low_stock_products(self.seller, threshold=10)]
+
+        self.assertIn("Mine Low", names)
+        self.assertNotIn("Theirs Low", names)
+
+    def test_get_low_stock_products_excludes_inactive_products(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Inactive Low",
+            price=Decimal("10.00"), stock=1, is_active=False,
+        )
+
+        names = [p["name"] for p in get_low_stock_products(self.seller, threshold=10)]
+
+        self.assertNotIn("Inactive Low", names)
+
+    def test_generate_product_description_cross_seller_raises_does_not_exist(self):
+        other_product = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        with self.assertRaises(Product.DoesNotExist):
+            generate_product_description(self.seller, other_product.id)
+
+
+class RunWithToolsTests(TestCase):
+    def setUp(self):
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_text_only_response_returns_immediately_without_second_call(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Hello seller")])
+
+        result = run_with_tools("hi", "sys", [], {}, self.seller)
+
+        self.assertEqual(result, "Hello seller")
+        self.assertEqual(mock_call.call_count, 1)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_tool_call_resolves_to_final_text(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_thing", {"x": 1})]),
+            _tool_response([_text_block("done")]),
+        ]
+        calls = []
+
+        def executor(seller, x):
+            calls.append((seller, x))
+            return "ok"
+
+        result = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(calls, [(self.seller, 1)])
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_loop_terminates_at_max_tool_calls(self, mock_call):
+        mock_call.side_effect = lambda *a, **k: _tool_response([_tool_use_block("get_thing", {"x": 1})])
+        calls = []
+
+        def executor(seller, x):
+            calls.append((seller, x))
+            return "ok"
+
+        result = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller, max_tool_calls=5)
+
+        self.assertEqual(result, MAX_TOOL_CALLS_REACHED_MESSAGE)
+        self.assertEqual(len(calls), 5)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_tool_executor_exception_is_fed_back_as_error_string_not_raised(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_thing", {})]),
+            _tool_response([_text_block("recovered")]),
+        ]
+
+        def failing_executor(seller):
+            raise ValueError("boom")
+
+        result = run_with_tools("hi", "sys", [], {"get_thing": failing_executor}, self.seller)
+
+        self.assertEqual(result, "recovered")
+        second_call_messages = mock_call.call_args_list[1].args[0]
+        tool_result_content = second_call_messages[-1]["content"][0]["content"]
+        self.assertIn("Error calling get_thing", tool_result_content)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_generation_error_returns_friendly_message_not_500(self, mock_call):
+        mock_call.side_effect = LLMGenerationError("boom")
+
+        result = run_with_tools("hi", "sys", [], {}, self.seller)
+
+        self.assertEqual(result, GENERATION_FAILED_MESSAGE)
+
+
+class SellerAssistantViewTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.url = "/api/ai/seller-assistant/"
+
+    def _auth_as(self, user):
+        token = RefreshToken.for_user(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token.access_token}")
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.post(self.url, {"question": "hi"}, format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_buyer_request_returns_403(self):
+        self._auth_as(self.buyer)
+        response = self.client.post(self.url, {"question": "hi"}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_empty_question_returns_400(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, {"question": "   "}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_tool_executor_is_called_with_the_authenticated_seller(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_low_stock_products", {})]),
+            _tool_response([_text_block("You have no low stock products.")]),
+        ]
+        mock_executor = MagicMock(return_value=[])
+        self._auth_as(self.seller)
+
+        with patch.dict(SELLER_TOOL_EXECUTORS, {"get_low_stock_products": mock_executor}):
+            response = self.client.post(self.url, {"question": "low stock?"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        mock_executor.assert_called_once_with(seller=self.seller)
+
+    @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_seller_assistant": "1/minute"})
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_throttle_returns_429_when_scope_limit_exceeded(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("done")])
+        self._auth_as(self.seller)
+
+        first = self.client.post(self.url, {"question": "hi"}, format="json")
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(self.url, {"question": "hi"}, format="json")
+        self.assertEqual(second.status_code, 429)

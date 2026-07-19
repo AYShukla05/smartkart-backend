@@ -21,7 +21,6 @@ from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationErro
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
 from ai.tools.seller_tools import (
-    SELLER_TOOL_EXECUTORS,
     find_product_by_name,
     generate_product_description,
     get_low_stock_products,
@@ -482,9 +481,10 @@ class RunWithToolsTests(TestCase):
     def test_text_only_response_returns_immediately_without_second_call(self, mock_call):
         mock_call.return_value = _tool_response([_text_block("Hello seller")])
 
-        result = run_with_tools("hi", "sys", [], {}, self.seller)
+        reply = run_with_tools("hi", "sys", [], {}, self.seller)
 
-        self.assertEqual(result, "Hello seller")
+        self.assertEqual(reply.text, "Hello seller")
+        self.assertIsNone(reply.pending_action)
         self.assertEqual(mock_call.call_count, 1)
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -499,9 +499,10 @@ class RunWithToolsTests(TestCase):
             calls.append((seller, x))
             return "ok"
 
-        result = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller)
+        reply = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller)
 
-        self.assertEqual(result, "done")
+        self.assertEqual(reply.text, "done")
+        self.assertIsNone(reply.pending_action)
         self.assertEqual(calls, [(self.seller, 1)])
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -513,9 +514,10 @@ class RunWithToolsTests(TestCase):
             calls.append((seller, x))
             return "ok"
 
-        result = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller, max_tool_calls=5)
+        reply = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller, max_tool_calls=5)
 
-        self.assertEqual(result, MAX_TOOL_CALLS_REACHED_MESSAGE)
+        self.assertEqual(reply.text, MAX_TOOL_CALLS_REACHED_MESSAGE)
+        self.assertIsNone(reply.pending_action)
         self.assertEqual(len(calls), 5)
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -528,9 +530,9 @@ class RunWithToolsTests(TestCase):
         def failing_executor(seller):
             raise ValueError("boom")
 
-        result = run_with_tools("hi", "sys", [], {"get_thing": failing_executor}, self.seller)
+        reply = run_with_tools("hi", "sys", [], {"get_thing": failing_executor}, self.seller)
 
-        self.assertEqual(result, "recovered")
+        self.assertEqual(reply.text, "recovered")
         second_call_messages = mock_call.call_args_list[1].args[0]
         tool_result_content = second_call_messages[-1]["content"][0]["content"]
         self.assertIn("Error calling get_thing", tool_result_content)
@@ -539,9 +541,73 @@ class RunWithToolsTests(TestCase):
     def test_generation_error_returns_friendly_message_not_500(self, mock_call):
         mock_call.side_effect = LLMGenerationError("boom")
 
-        result = run_with_tools("hi", "sys", [], {}, self.seller)
+        reply = run_with_tools("hi", "sys", [], {}, self.seller)
 
-        self.assertEqual(result, GENERATION_FAILED_MESSAGE)
+        self.assertEqual(reply.text, GENERATION_FAILED_MESSAGE)
+        self.assertIsNone(reply.pending_action)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_proposal_tool_is_captured_and_loop_stops_after_one_closing_call(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50})]),
+            _tool_response([_text_block("Update stock to 50?"), _tool_use_block("get_seller_stats", {})]),
+        ]
+
+        def propose(seller, product_id, new_stock):
+            return {
+                "action": "update_product_stock", "product_id": product_id,
+                "product_name": "Widget", "field": "stock", "current_value": 10, "new_value": new_stock,
+            }
+
+        reply = run_with_tools(
+            "update stock", "sys", [], {"propose_stock_update": propose}, self.seller,
+            proposal_tool_names={"propose_stock_update"},
+        )
+
+        self.assertEqual(reply.text, "Update stock to 50?")
+        self.assertEqual(reply.pending_action["product_id"], 1)
+        self.assertEqual(reply.pending_action["new_value"], 50)
+        # The closing response's get_seller_stats tool_use must be ignored, not executed
+        self.assertEqual(mock_call.call_count, 2)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_failed_proposal_does_not_set_pending_action(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_stock_update", {"product_id": 999, "new_stock": 50})]),
+            _tool_response([_text_block("I couldn't find that product.")]),
+        ]
+
+        def failing_propose(seller, product_id, new_stock):
+            raise ValueError("boom")
+
+        reply = run_with_tools(
+            "update stock", "sys", [], {"propose_stock_update": failing_propose}, self.seller,
+            proposal_tool_names={"propose_stock_update"},
+        )
+
+        self.assertEqual(reply.text, "I couldn't find that product.")
+        self.assertIsNone(reply.pending_action)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_proposal_closing_call_failure_still_returns_pending_action(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_price_update", {"product_id": 1, "new_price": "9.99"})]),
+            LLMGenerationError("boom"),
+        ]
+
+        def propose(seller, product_id, new_price):
+            return {
+                "action": "update_product_price", "product_id": product_id,
+                "product_name": "Widget", "field": "price", "current_value": "19.99", "new_value": new_price,
+            }
+
+        reply = run_with_tools(
+            "update price", "sys", [], {"propose_price_update": propose}, self.seller,
+            proposal_tool_names={"propose_price_update"},
+        )
+
+        self.assertIn("Widget", reply.text)
+        self.assertEqual(reply.pending_action["new_value"], "9.99")
 
 
 class SellerAssistantViewTests(TestCase):
@@ -583,7 +649,7 @@ class SellerAssistantViewTests(TestCase):
         mock_executor = MagicMock(return_value=[])
         self._auth_as(self.seller)
 
-        with patch.dict(SELLER_TOOL_EXECUTORS, {"get_low_stock_products": mock_executor}):
+        with patch.dict("ai.views.SELLER_ASSISTANT_TOOL_EXECUTORS", {"get_low_stock_products": mock_executor}):
             response = self.client.post(self.url, {"question": "low stock?"}, format="json")
 
         self.assertEqual(response.status_code, 200)
@@ -599,4 +665,106 @@ class SellerAssistantViewTests(TestCase):
         self.assertEqual(first.status_code, 200)
 
         second = self.client.post(self.url, {"question": "hi"}, format="json")
+        self.assertEqual(second.status_code, 429)
+
+
+class ConfirmSellerActionViewTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.other_seller = User.objects.create_user(
+            email="other-seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.category = Category.objects.create(name="Kitchen", slug="kitchen")
+        self.product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Widget",
+            price=Decimal("20.00"), stock=5,
+        )
+        self.url = "/api/ai/seller-assistant/confirm-action/"
+
+    def _auth_as(self, user):
+        token = RefreshToken.for_user(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token.access_token}")
+
+    def _payload(self, **overrides):
+        payload = {"action": "update_product_stock", "product_id": self.product.id, "new_value": 42}
+        payload.update(overrides)
+        return payload
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_buyer_request_returns_403(self):
+        self._auth_as(self.buyer)
+        response = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_unknown_action_returns_400(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(action="delete_everything"), format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_new_value_returns_400(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(new_value=""), format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_confirm_stock_update_persists_change(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(new_value=42), format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["success"])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 42)
+
+    def test_confirm_price_update_persists_change(self):
+        self._auth_as(self.seller)
+        payload = self._payload(action="update_product_price", new_value="35.50")
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.price, Decimal("35.50"))
+
+    def test_cross_seller_product_returns_404_and_does_not_mutate(self):
+        self._auth_as(self.other_seller)
+        response = self.client.post(self.url, self._payload(new_value=999), format="json")
+
+        self.assertEqual(response.status_code, 404)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+
+    def test_negative_stock_returns_400_and_does_not_mutate(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(new_value=-1), format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+
+    def test_negative_price_returns_400_and_does_not_mutate(self):
+        self._auth_as(self.seller)
+        payload = self._payload(action="update_product_price", new_value="-5.00")
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.price, Decimal("20.00"))
+
+    @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_seller_action": "1/minute"})
+    def test_throttle_returns_429_when_scope_limit_exceeded(self):
+        self._auth_as(self.seller)
+
+        first = self.client.post(self.url, self._payload(new_value=10), format="json")
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(self.url, self._payload(new_value=11), format="json")
         self.assertEqual(second.status_code, 429)

@@ -171,6 +171,7 @@ REST_FRAMEWORK = {
         "auth": "10/minute",
         "ai_generate": "10/minute",
         "ai_seller_assistant": "5/minute",
+        "ai_seller_action": "20/minute",
     },
 }
 

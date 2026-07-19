@@ -69,6 +69,36 @@ def get_low_stock_products(seller, threshold=10):
     return list(products)
 
 
+FIND_PRODUCT_BY_NAME_DEFINITION = {
+    "name": "find_product_by_name",
+    "description": (
+        "Search this seller's own products by name to find a product's ID. "
+        "Use this whenever the seller refers to a product by name rather than by "
+        "ID - sellers don't track IDs, so this is usually the first step before "
+        "any action that requires a product_id (generating a description, or "
+        "proposing a stock/price update)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The product name, or part of it, to search for.",
+            }
+        },
+        "required": ["name"],
+    },
+}
+
+
+def find_product_by_name(seller, name):
+    products = Product.objects.filter(
+        seller=seller,
+        name__icontains=name,
+    ).order_by("name").values("id", "name", "stock", "price")[:10]
+    return list(products)
+
+
 GENERATE_DESCRIPTION_DEFINITION = {
     "name": "generate_product_description",
     "description": (
@@ -145,6 +175,7 @@ def search_similar_products(seller, query, limit=5):
 SELLER_TOOL_DEFINITIONS = [
     GET_SELLER_STATS_DEFINITION,
     GET_LOW_STOCK_DEFINITION,
+    FIND_PRODUCT_BY_NAME_DEFINITION,
     GENERATE_DESCRIPTION_DEFINITION,
     SEARCH_SIMILAR_DEFINITION,
 ]
@@ -152,6 +183,7 @@ SELLER_TOOL_DEFINITIONS = [
 SELLER_TOOL_EXECUTORS = {
     "get_seller_stats": get_seller_stats,
     "get_low_stock_products": get_low_stock_products,
+    "find_product_by_name": find_product_by_name,
     "generate_product_description": generate_product_description,
     "search_similar_products": search_similar_products,
 }

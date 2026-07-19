@@ -20,7 +20,12 @@ from ai.prompts import build_description_prompt
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
-from ai.tools.seller_tools import SELLER_TOOL_EXECUTORS, generate_product_description, get_low_stock_products
+from ai.tools.seller_tools import (
+    SELLER_TOOL_EXECUTORS,
+    find_product_by_name,
+    generate_product_description,
+    get_low_stock_products,
+)
 
 
 def _tool_use_block(name, input_, block_id="tool_1"):
@@ -436,6 +441,35 @@ class SellerToolsTests(TestCase):
 
         with self.assertRaises(Product.DoesNotExist):
             generate_product_description(self.seller, other_product.id)
+
+    def test_find_product_by_name_matches_partial_case_insensitive(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Steel Water Bottle",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        results = find_product_by_name(self.seller, "water")
+
+        self.assertEqual([r["name"] for r in results], ["Steel Water Bottle"])
+
+    def test_find_product_by_name_excludes_other_sellers_products(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Shared Name Widget",
+            price=Decimal("10.00"), stock=5,
+        )
+        Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Shared Name Widget",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        results = find_product_by_name(self.seller, "Shared Name Widget")
+
+        self.assertEqual(len(results), 1)
+
+    def test_find_product_by_name_no_match_returns_empty_list(self):
+        results = find_product_by_name(self.seller, "nothing matches this")
+
+        self.assertEqual(results, [])
 
 
 class RunWithToolsTests(TestCase):

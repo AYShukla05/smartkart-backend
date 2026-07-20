@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from types import SimpleNamespace
@@ -7,11 +8,13 @@ from unittest.mock import MagicMock, patch
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from categories.models import Category
+from orders.models import Order, OrderItem
 from products.models import Product
 from users.models import User
 from ai.models import ProductEmbedding
@@ -23,7 +26,10 @@ from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_RE
 from ai.tools.seller_tools import (
     find_product_by_name,
     generate_product_description,
+    get_category_breakdown,
     get_low_stock_products,
+    get_recent_orders,
+    get_top_selling_products,
 )
 
 
@@ -469,6 +475,145 @@ class SellerToolsTests(TestCase):
         results = find_product_by_name(self.seller, "nothing matches this")
 
         self.assertEqual(results, [])
+
+    def _create_order_item(self, seller, product, buyer, quantity, price, created_at=None):
+        order = Order.objects.create(buyer=buyer, total_amount=price * quantity)
+        item = OrderItem.objects.create(
+            order=order, product=product, seller=seller,
+            quantity=quantity, price_at_purchase=price,
+        )
+        if created_at is not None:
+            Order.objects.filter(id=order.id).update(created_at=created_at)
+        return item
+
+    def test_get_top_selling_products_ranks_by_quantity_sold(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        best = Product.objects.create(
+            seller=self.seller, category=self.category, name="Best Seller",
+            price=Decimal("10.00"), stock=100,
+        )
+        worst = Product.objects.create(
+            seller=self.seller, category=self.category, name="Slow Mover",
+            price=Decimal("10.00"), stock=100,
+        )
+        self._create_order_item(self.seller, best, buyer, quantity=8, price=Decimal("10.00"))
+        self._create_order_item(self.seller, worst, buyer, quantity=1, price=Decimal("10.00"))
+
+        results = get_top_selling_products(self.seller, limit=2)
+
+        self.assertEqual(results[0]["name"], "Best Seller")
+        self.assertEqual(results[0]["total_quantity_sold"], 8)
+        self.assertEqual(results[1]["name"], "Slow Mover")
+
+    def test_get_top_selling_products_excludes_other_sellers(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        mine = Product.objects.create(
+            seller=self.seller, category=self.category, name="Mine",
+            price=Decimal("10.00"), stock=100,
+        )
+        theirs = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=100,
+        )
+        self._create_order_item(self.seller, mine, buyer, quantity=3, price=Decimal("10.00"))
+        self._create_order_item(self.other_seller, theirs, buyer, quantity=99, price=Decimal("10.00"))
+
+        names = [r["name"] for r in get_top_selling_products(self.seller)]
+
+        self.assertEqual(names, ["Mine"])
+
+    def test_get_top_selling_products_respects_days_window(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Old Sale",
+            price=Decimal("10.00"), stock=100,
+        )
+        old_date = timezone.now() - timedelta(days=60)
+        self._create_order_item(self.seller, product, buyer, quantity=5, price=Decimal("10.00"), created_at=old_date)
+
+        results = get_top_selling_products(self.seller, days=30)
+
+        self.assertEqual(results, [])
+
+    def test_get_category_breakdown_groups_by_category_and_excludes_other_sellers(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        electronics = Category.objects.create(name="Electronics", slug="electronics")
+        mine = Product.objects.create(
+            seller=self.seller, category=self.category, name="Mine",
+            price=Decimal("10.00"), stock=100,
+        )
+        mine_electronics = Product.objects.create(
+            seller=self.seller, category=electronics, name="Mine Electronics",
+            price=Decimal("50.00"), stock=100,
+        )
+        theirs = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=100,
+        )
+        self._create_order_item(self.seller, mine, buyer, quantity=2, price=Decimal("10.00"))
+        self._create_order_item(self.seller, mine_electronics, buyer, quantity=1, price=Decimal("50.00"))
+        self._create_order_item(self.other_seller, theirs, buyer, quantity=99, price=Decimal("10.00"))
+
+        results = get_category_breakdown(self.seller)
+        by_category = {r["category"]: r for r in results}
+
+        self.assertEqual(set(by_category), {"Kitchen", "Electronics"})
+        self.assertEqual(by_category["Kitchen"]["total_quantity_sold"], 2)
+        self.assertEqual(by_category["Electronics"]["total_quantity_sold"], 1)
+
+    def test_get_category_breakdown_respects_days_window(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Old Sale",
+            price=Decimal("10.00"), stock=100,
+        )
+        old_date = timezone.now() - timedelta(days=60)
+        self._create_order_item(self.seller, product, buyer, quantity=5, price=Decimal("10.00"), created_at=old_date)
+
+        results = get_category_breakdown(self.seller, days=30)
+
+        self.assertEqual(results, [])
+
+    def test_get_recent_orders_orders_most_recent_first_and_excludes_other_sellers(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        older_product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Older Sale",
+            price=Decimal("10.00"), stock=100,
+        )
+        newer_product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Newer Sale",
+            price=Decimal("10.00"), stock=100,
+        )
+        theirs = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=100,
+        )
+        self._create_order_item(
+            self.seller, older_product, buyer, quantity=1, price=Decimal("10.00"),
+            created_at=timezone.now() - timedelta(days=5),
+        )
+        self._create_order_item(
+            self.seller, newer_product, buyer, quantity=2, price=Decimal("10.00"),
+            created_at=timezone.now() - timedelta(days=1),
+        )
+        self._create_order_item(self.other_seller, theirs, buyer, quantity=1, price=Decimal("10.00"))
+
+        results = get_recent_orders(self.seller)
+
+        self.assertEqual([r["product_name"] for r in results], ["Newer Sale", "Older Sale"])
+
+    def test_get_recent_orders_respects_limit(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Repeat Buy",
+            price=Decimal("10.00"), stock=100,
+        )
+        for _ in range(3):
+            self._create_order_item(self.seller, product, buyer, quantity=1, price=Decimal("10.00"))
+
+        results = get_recent_orders(self.seller, limit=2)
+
+        self.assertEqual(len(results), 2)
 
 
 class RunWithToolsTests(TestCase):

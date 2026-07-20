@@ -44,6 +44,138 @@ def get_seller_stats(seller, days=None):
     }
 
 
+GET_TOP_SELLING_PRODUCTS_DEFINITION = {
+    "name": "get_top_selling_products",
+    "description": (
+        "Get this seller's best-selling products, ranked by total units sold. "
+        "Optionally filtered to a recent time window."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of products to return. Default 5.",
+                "default": 5,
+            },
+            "days": {
+                "type": "integer",
+                "description": "Look back this many days. Omit for all-time.",
+            },
+        },
+    },
+}
+
+
+def get_top_selling_products(seller, limit=5, days=None):
+    qs = OrderItem.objects.filter(seller=seller)
+    if days:
+        since = timezone.now() - timedelta(days=days)
+        qs = qs.filter(order__created_at__gte=since)
+
+    results = (
+        qs.values("product_id", "product__name")
+        .annotate(
+            total_quantity_sold=Sum("quantity"),
+            total_revenue=Sum(F("price_at_purchase") * F("quantity")),
+        )
+        .order_by("-total_quantity_sold")[:limit]
+    )
+    return [
+        {
+            "product_id": r["product_id"],
+            "name": r["product__name"],
+            "total_quantity_sold": r["total_quantity_sold"],
+            "total_revenue": str(r["total_revenue"]),
+        }
+        for r in results
+    ]
+
+
+GET_CATEGORY_BREAKDOWN_DEFINITION = {
+    "name": "get_category_breakdown",
+    "description": (
+        "Get this seller's sales broken down by product category - units sold and "
+        "revenue per category. Optionally filtered to a recent time window. Use this "
+        "for questions like 'which category sells best for me'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "days": {
+                "type": "integer",
+                "description": "Look back this many days. Omit for all-time.",
+            }
+        },
+    },
+}
+
+
+def get_category_breakdown(seller, days=None):
+    qs = OrderItem.objects.filter(seller=seller)
+    if days:
+        since = timezone.now() - timedelta(days=days)
+        qs = qs.filter(order__created_at__gte=since)
+
+    results = (
+        qs.values("product__category__name")
+        .annotate(
+            total_quantity_sold=Sum("quantity"),
+            total_revenue=Sum(F("price_at_purchase") * F("quantity")),
+        )
+        .order_by("-total_revenue")
+    )
+    return [
+        {
+            "category": r["product__category__name"],
+            "total_quantity_sold": r["total_quantity_sold"],
+            "total_revenue": str(r["total_revenue"]),
+        }
+        for r in results
+    ]
+
+
+GET_RECENT_ORDERS_DEFINITION = {
+    "name": "get_recent_orders",
+    "description": (
+        "Get this seller's most recent orders. Each entry is one of this seller's "
+        "product line items sold as part of an order, with that order's status and "
+        "date. Use this for questions like 'what did I just sell' or 'show me my "
+        "recent orders', as opposed to aggregate sales stats."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of order line items to return, most recent first. Default 10.",
+                "default": 10,
+            }
+        },
+    },
+}
+
+
+def get_recent_orders(seller, limit=10):
+    items = (
+        OrderItem.objects.filter(seller=seller)
+        .select_related("order", "product")
+        .order_by("-order__created_at")[:limit]
+    )
+    return [
+        {
+            "order_id": item.order_id,
+            "product_id": item.product_id,
+            "product_name": item.product.name,
+            "quantity": item.quantity,
+            "price_at_purchase": str(item.price_at_purchase),
+            "status": item.order.status,
+            "created_at": item.order.created_at.isoformat(),
+        }
+        for item in items
+    ]
+
+
 GET_LOW_STOCK_DEFINITION = {
     "name": "get_low_stock_products",
     "description": "Get this seller's products that are low in stock or out of stock.",
@@ -174,6 +306,9 @@ def search_similar_products(seller, query, limit=5):
 
 SELLER_TOOL_DEFINITIONS = [
     GET_SELLER_STATS_DEFINITION,
+    GET_TOP_SELLING_PRODUCTS_DEFINITION,
+    GET_CATEGORY_BREAKDOWN_DEFINITION,
+    GET_RECENT_ORDERS_DEFINITION,
     GET_LOW_STOCK_DEFINITION,
     FIND_PRODUCT_BY_NAME_DEFINITION,
     GENERATE_DESCRIPTION_DEFINITION,
@@ -182,6 +317,9 @@ SELLER_TOOL_DEFINITIONS = [
 
 SELLER_TOOL_EXECUTORS = {
     "get_seller_stats": get_seller_stats,
+    "get_top_selling_products": get_top_selling_products,
+    "get_category_breakdown": get_category_breakdown,
+    "get_recent_orders": get_recent_orders,
     "get_low_stock_products": get_low_stock_products,
     "find_product_by_name": find_product_by_name,
     "generate_product_description": generate_product_description,

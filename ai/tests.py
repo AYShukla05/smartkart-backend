@@ -28,7 +28,10 @@ from ai.tools.seller_tools import (
     generate_product_description,
     get_category_breakdown,
     get_low_stock_products,
+    get_lowest_stock_products,
+    get_product_performance,
     get_recent_orders,
+    get_stock_forecast,
     get_top_selling_products,
 )
 
@@ -614,6 +617,135 @@ class SellerToolsTests(TestCase):
         results = get_recent_orders(self.seller, limit=2)
 
         self.assertEqual(len(results), 2)
+
+    def test_get_lowest_stock_products_orders_lowest_first(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="High Stock",
+            price=Decimal("10.00"), stock=50,
+        )
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Lowest Stock",
+            price=Decimal("10.00"), stock=1,
+        )
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Mid Stock",
+            price=Decimal("10.00"), stock=10,
+        )
+
+        names = [p["name"] for p in get_lowest_stock_products(self.seller, limit=2)]
+
+        self.assertEqual(names, ["Lowest Stock", "Mid Stock"])
+
+    def test_get_lowest_stock_products_excludes_other_sellers_and_inactive(self):
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Inactive",
+            price=Decimal("10.00"), stock=0, is_active=False,
+        )
+        Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=0,
+        )
+        Product.objects.create(
+            seller=self.seller, category=self.category, name="Mine",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        names = [p["name"] for p in get_lowest_stock_products(self.seller)]
+
+        self.assertEqual(names, ["Mine"])
+
+    def test_get_product_performance_aggregates_sales_and_includes_current_state(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Tracked Product",
+            price=Decimal("15.00"), stock=42,
+        )
+        self._create_order_item(self.seller, product, buyer, quantity=3, price=Decimal("15.00"))
+        self._create_order_item(self.seller, product, buyer, quantity=2, price=Decimal("15.00"))
+
+        result = get_product_performance(self.seller, product.id)
+
+        self.assertEqual(result["name"], "Tracked Product")
+        self.assertEqual(result["current_stock"], 42)
+        self.assertTrue(result["is_active"])
+        self.assertEqual(result["total_quantity_sold"], 5)
+        self.assertEqual(Decimal(result["total_revenue"]), Decimal("75.00"))
+
+    def test_get_product_performance_with_no_sales_returns_zeroes(self):
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Never Sold",
+            price=Decimal("15.00"), stock=10,
+        )
+
+        result = get_product_performance(self.seller, product.id)
+
+        self.assertEqual(result["total_quantity_sold"], 0)
+        self.assertEqual(result["total_revenue"], "0")
+
+    def test_get_product_performance_cross_seller_raises_does_not_exist(self):
+        other_product = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        with self.assertRaises(Product.DoesNotExist):
+            get_product_performance(self.seller, other_product.id)
+
+    def test_get_stock_forecast_estimates_days_remaining_from_recent_velocity(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Selling Fast",
+            price=Decimal("10.00"), stock=30,
+        )
+        # 10 units sold over the last 10 days -> 1/day -> 30 days of stock left
+        for days_ago in range(10):
+            self._create_order_item(
+                self.seller, product, buyer, quantity=1, price=Decimal("10.00"),
+                created_at=timezone.now() - timedelta(days=days_ago),
+            )
+
+        result = get_stock_forecast(self.seller, product.id, days=30)
+
+        self.assertEqual(result["current_stock"], 30)
+        self.assertEqual(result["units_sold_recently"], 10)
+        self.assertAlmostEqual(result["average_daily_sales"], 10 / 30, places=2)
+        self.assertAlmostEqual(result["estimated_days_of_stock_remaining"], 30 / (10 / 30), places=1)
+
+    def test_get_stock_forecast_with_no_recent_sales_returns_none_estimate(self):
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Never Sold",
+            price=Decimal("10.00"), stock=30,
+        )
+
+        result = get_stock_forecast(self.seller, product.id)
+
+        self.assertEqual(result["units_sold_recently"], 0)
+        self.assertIsNone(result["estimated_days_of_stock_remaining"])
+
+    def test_get_stock_forecast_ignores_sales_outside_window(self):
+        buyer = User.objects.create_user(email="buyer@test.com", password="testpass123", role="BUYER")
+        product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Old Sale Only",
+            price=Decimal("10.00"), stock=30,
+        )
+        self._create_order_item(
+            self.seller, product, buyer, quantity=5, price=Decimal("10.00"),
+            created_at=timezone.now() - timedelta(days=60),
+        )
+
+        result = get_stock_forecast(self.seller, product.id, days=30)
+
+        self.assertEqual(result["units_sold_recently"], 0)
+        self.assertIsNone(result["estimated_days_of_stock_remaining"])
+
+    def test_get_stock_forecast_cross_seller_raises_does_not_exist(self):
+        other_product = Product.objects.create(
+            seller=self.other_seller, category=self.category, name="Theirs",
+            price=Decimal("10.00"), stock=5,
+        )
+
+        with self.assertRaises(Product.DoesNotExist):
+            get_stock_forecast(self.seller, other_product.id)
 
 
 class RunWithToolsTests(TestCase):

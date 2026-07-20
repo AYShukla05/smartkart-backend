@@ -201,6 +201,35 @@ def get_low_stock_products(seller, threshold=10):
     return list(products)
 
 
+GET_LOWEST_STOCK_PRODUCTS_DEFINITION = {
+    "name": "get_lowest_stock_products",
+    "description": (
+        "Get this seller's products with the least stock, ranked lowest first, "
+        "regardless of any threshold. Use this for questions like 'what's my "
+        "lowest stock item' - use get_low_stock_products instead for questions "
+        "like 'what's below 10 units'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "How many products to return, lowest stock first. Default 5.",
+                "default": 5,
+            }
+        },
+    },
+}
+
+
+def get_lowest_stock_products(seller, limit=5):
+    products = Product.objects.filter(
+        seller=seller,
+        is_active=True,
+    ).order_by("stock").values("id", "name", "stock", "price")[:limit]
+    return list(products)
+
+
 FIND_PRODUCT_BY_NAME_DEFINITION = {
     "name": "find_product_by_name",
     "description": (
@@ -229,6 +258,91 @@ def find_product_by_name(seller, name):
         name__icontains=name,
     ).order_by("name").values("id", "name", "stock", "price")[:10]
     return list(products)
+
+
+GET_PRODUCT_PERFORMANCE_DEFINITION = {
+    "name": "get_product_performance",
+    "description": (
+        "Get a single product's performance: current stock, price, active status, "
+        "total units sold, and total revenue generated. Use this when the seller "
+        "asks how a specific product is doing - resolve the product's ID with "
+        "find_product_by_name first if you only have its name."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "product_id": {
+                "type": "integer",
+                "description": "The ID of the product to look up.",
+            }
+        },
+        "required": ["product_id"],
+    },
+}
+
+
+def get_product_performance(seller, product_id):
+    product = Product.objects.get(id=product_id, seller=seller)
+    stats = OrderItem.objects.filter(seller=seller, product_id=product_id).aggregate(
+        total_quantity_sold=Sum("quantity"),
+        total_revenue=Sum(F("price_at_purchase") * F("quantity")),
+    )
+    return {
+        "product_id": product.id,
+        "name": product.name,
+        "is_active": product.is_active,
+        "current_stock": product.stock,
+        "price": str(product.price),
+        "total_quantity_sold": stats["total_quantity_sold"] or 0,
+        "total_revenue": str(stats["total_revenue"] or 0),
+    }
+
+
+GET_STOCK_FORECAST_DEFINITION = {
+    "name": "get_stock_forecast",
+    "description": (
+        "Estimate how many days until a product runs out of stock, based on its "
+        "recent sales velocity. Use this for questions like 'when will X run out' or "
+        "'do I need to restock X soon' - resolve the product's ID with "
+        "find_product_by_name first if you only have its name."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "product_id": {
+                "type": "integer",
+                "description": "The ID of the product to forecast.",
+            },
+            "days": {
+                "type": "integer",
+                "description": "How many days of recent sales history to base the estimate on. Default 30.",
+                "default": 30,
+            },
+        },
+        "required": ["product_id"],
+    },
+}
+
+
+def get_stock_forecast(seller, product_id, days=30):
+    product = Product.objects.get(id=product_id, seller=seller)
+    since = timezone.now() - timedelta(days=days)
+    units_sold = OrderItem.objects.filter(
+        seller=seller, product_id=product_id, order__created_at__gte=since,
+    ).aggregate(total=Sum("quantity"))["total"] or 0
+
+    average_daily_sales = units_sold / days
+    days_remaining = round(product.stock / average_daily_sales, 1) if average_daily_sales > 0 else None
+
+    return {
+        "product_id": product.id,
+        "name": product.name,
+        "current_stock": product.stock,
+        "units_sold_recently": units_sold,
+        "window_days": days,
+        "average_daily_sales": round(average_daily_sales, 2),
+        "estimated_days_of_stock_remaining": days_remaining,
+    }
 
 
 GENERATE_DESCRIPTION_DEFINITION = {
@@ -310,7 +424,10 @@ SELLER_TOOL_DEFINITIONS = [
     GET_CATEGORY_BREAKDOWN_DEFINITION,
     GET_RECENT_ORDERS_DEFINITION,
     GET_LOW_STOCK_DEFINITION,
+    GET_LOWEST_STOCK_PRODUCTS_DEFINITION,
     FIND_PRODUCT_BY_NAME_DEFINITION,
+    GET_PRODUCT_PERFORMANCE_DEFINITION,
+    GET_STOCK_FORECAST_DEFINITION,
     GENERATE_DESCRIPTION_DEFINITION,
     SEARCH_SIMILAR_DEFINITION,
 ]
@@ -321,7 +438,10 @@ SELLER_TOOL_EXECUTORS = {
     "get_category_breakdown": get_category_breakdown,
     "get_recent_orders": get_recent_orders,
     "get_low_stock_products": get_low_stock_products,
+    "get_lowest_stock_products": get_lowest_stock_products,
     "find_product_by_name": find_product_by_name,
+    "get_product_performance": get_product_performance,
+    "get_stock_forecast": get_stock_forecast,
     "generate_product_description": generate_product_description,
     "search_similar_products": search_similar_products,
 }

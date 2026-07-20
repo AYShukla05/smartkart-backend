@@ -139,17 +139,10 @@ class ConfirmSellerActionView(APIView):
             )
 
         try:
-            product = executor(seller=request.user, product_id=product_id, new_value=new_value)
+            result = executor(seller=request.user, product_id=product_id, new_value=new_value)
         except Product.DoesNotExist:
             return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
         except (ValueError, TypeError):
             return Response({"detail": "Invalid value for this action."}, status=status.HTTP_400_BAD_REQUEST)
 
-        field = "stock" if action == "update_product_stock" else "price"
-        return Response({
-            "success": True,
-            "product_id": product.id,
-            "product_name": product.name,
-            "field": field,
-            "new_value": getattr(product, field),
-        })
+        return Response({"success": True, **result})

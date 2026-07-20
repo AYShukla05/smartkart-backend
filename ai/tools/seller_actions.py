@@ -7,7 +7,11 @@ from products.models import Product
 # proposal and stops, instead of letting the model keep chaining calls.
 # The model can request a proposal; only a seller's explicit confirmation
 # (via ConfirmSellerActionView, never through the LLM loop) executes it.
-PROPOSAL_TOOL_NAMES = frozenset({"propose_stock_update", "propose_price_update"})
+PROPOSAL_TOOL_NAMES = frozenset({
+    "propose_stock_update",
+    "propose_price_update",
+    "propose_toggle_product_active",
+})
 
 PROPOSE_STOCK_UPDATE_DEFINITION = {
     "name": "propose_stock_update",
@@ -58,6 +62,33 @@ PROPOSE_PRICE_UPDATE_DEFINITION = {
 }
 
 
+PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION = {
+    "name": "propose_toggle_product_active",
+    "description": (
+        "Propose activating or deactivating one of this seller's product listings. "
+        "A deactivated product is hidden from buyers but not deleted, and can be "
+        "reactivated later. This does NOT change anything yet - the seller must "
+        "explicitly confirm the proposal in the UI before it takes effect. Use this "
+        "when the seller asks to deactivate, hide, pause, delist, reactivate, or "
+        "relist a specific product. Never claim the change has already been made."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "product_id": {
+                "type": "integer",
+                "description": "The ID of the product to update.",
+            },
+            "new_active": {
+                "type": "boolean",
+                "description": "True to activate/relist the product, false to deactivate/hide it.",
+            },
+        },
+        "required": ["product_id", "new_active"],
+    },
+}
+
+
 def propose_stock_update(seller, product_id, new_stock):
     # seller=seller filter is what prevents proposing changes to another seller's product
     product = Product.objects.get(id=product_id, seller=seller)
@@ -94,6 +125,31 @@ def propose_price_update(seller, product_id, new_price):
     }
 
 
+def propose_toggle_product_active(seller, product_id, new_active):
+    product = Product.objects.get(id=product_id, seller=seller)
+    new_active = bool(new_active)
+
+    return {
+        "action": "toggle_product_active",
+        "product_id": product.id,
+        "product_name": product.name,
+        "field": "status",
+        "current_value": "active" if product.is_active else "inactive",
+        "new_value": "active" if new_active else "inactive",
+    }
+
+
+def _parse_active_value(new_value):
+    if isinstance(new_value, bool):
+        return new_value
+    normalized = str(new_value).strip().lower()
+    if normalized in ("active", "true", "1"):
+        return True
+    if normalized in ("inactive", "false", "0"):
+        return False
+    raise ValueError(f"'{new_value}' is not a valid status.")
+
+
 def execute_stock_update(seller, product_id, new_value):
     """Only ever called from ConfirmSellerActionView - never reachable from the LLM loop.
 
@@ -108,7 +164,7 @@ def execute_stock_update(seller, product_id, new_value):
 
     product.stock = new_stock
     product.save(update_fields=["stock"])
-    return product
+    return {"product_id": product.id, "product_name": product.name, "field": "stock", "new_value": product.stock}
 
 
 def execute_price_update(seller, product_id, new_value):
@@ -123,20 +179,38 @@ def execute_price_update(seller, product_id, new_value):
 
     product.price = new_price_decimal
     product.save(update_fields=["price"])
-    return product
+    return {"product_id": product.id, "product_name": product.name, "field": "price", "new_value": str(product.price)}
+
+
+def execute_toggle_product_active(seller, product_id, new_value):
+    """Only ever called from ConfirmSellerActionView - never reachable from the LLM loop."""
+    product = Product.objects.get(id=product_id, seller=seller)
+    new_active = _parse_active_value(new_value)
+
+    product.is_active = new_active
+    product.save(update_fields=["is_active"])
+    return {
+        "product_id": product.id,
+        "product_name": product.name,
+        "field": "status",
+        "new_value": "active" if new_active else "inactive",
+    }
 
 
 SELLER_ACTION_DEFINITIONS = [
     PROPOSE_STOCK_UPDATE_DEFINITION,
     PROPOSE_PRICE_UPDATE_DEFINITION,
+    PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION,
 ]
 
 SELLER_ACTION_PROPOSE_EXECUTORS = {
     "propose_stock_update": propose_stock_update,
     "propose_price_update": propose_price_update,
+    "propose_toggle_product_active": propose_toggle_product_active,
 }
 
 SELLER_ACTION_CONFIRM_EXECUTORS = {
     "update_product_stock": execute_stock_update,
     "update_product_price": execute_price_update,
+    "toggle_product_active": execute_toggle_product_active,
 }

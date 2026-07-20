@@ -1036,6 +1036,45 @@ class ConfirmSellerActionViewTests(TestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.price, Decimal("20.00"))
 
+    def test_confirm_toggle_active_persists_change(self):
+        self._auth_as(self.seller)
+        payload = self._payload(action="toggle_product_active", new_value="inactive")
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["field"], "status")
+        self.assertEqual(response.data["new_value"], "inactive")
+        self.product.refresh_from_db()
+        self.assertFalse(self.product.is_active)
+
+    def test_confirm_toggle_active_accepts_boolean_new_value(self):
+        self._auth_as(self.seller)
+        payload = self._payload(action="toggle_product_active", new_value=False)
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertFalse(self.product.is_active)
+
+    def test_toggle_active_invalid_value_returns_400_and_does_not_mutate(self):
+        self._auth_as(self.seller)
+        payload = self._payload(action="toggle_product_active", new_value="banana")
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.product.refresh_from_db()
+        self.assertTrue(self.product.is_active)
+
+    def test_cross_seller_toggle_active_returns_404_and_does_not_mutate(self):
+        self._auth_as(self.other_seller)
+        payload = self._payload(action="toggle_product_active", new_value="inactive")
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 404)
+        self.product.refresh_from_db()
+        self.assertTrue(self.product.is_active)
+
     @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_seller_action": "1/minute"})
     def test_throttle_returns_429_when_scope_limit_exceeded(self):
         self._auth_as(self.seller)

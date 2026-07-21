@@ -23,6 +23,7 @@ from ai.prompts import build_description_prompt
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
+from ai.tools.seller_actions import execute_create_product, propose_create_product
 from ai.tools.seller_tools import (
     find_product_by_name,
     generate_product_description,
@@ -748,6 +749,78 @@ class SellerToolsTests(TestCase):
             get_stock_forecast(self.seller, other_product.id)
 
 
+class SellerActionsTests(TestCase):
+    """propose_create_product / execute_create_product get direct unit tests -
+    unlike the older propose/execute pairs, category resolution is new,
+    non-trivial logic and row creation is higher-stakes than a field update."""
+
+    def setUp(self):
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.category = Category.objects.create(name="Kitchen", slug="kitchen")
+        self.inactive_category = Category.objects.create(
+            name="Discontinued", slug="discontinued", is_active=False,
+        )
+
+    def test_propose_create_product_returns_summary_and_confirm_fields(self):
+        result = propose_create_product(self.seller, "Steel Kettle", "Kitchen", "24.99", 10)
+
+        self.assertEqual(result["action"], "create_product")
+        self.assertIsNone(result["product_id"])
+        self.assertEqual(result["product_name"], "Steel Kettle")
+        self.assertEqual(result["category_id"], self.category.id)
+        self.assertEqual(result["price"], "24.99")
+        self.assertEqual(result["stock"], 10)
+        self.assertIn("Kitchen", result["summary"])
+
+    def test_propose_create_product_resolves_category_case_insensitively(self):
+        result = propose_create_product(self.seller, "Steel Kettle", "kitchen", "24.99", 10)
+
+        self.assertEqual(result["category_id"], self.category.id)
+
+    def test_propose_create_product_no_matching_category_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            propose_create_product(self.seller, "Steel Kettle", "Nonexistent Category", "24.99", 10)
+
+    def test_propose_create_product_ambiguous_category_raises_value_error(self):
+        Category.objects.create(name="Kitchen Tools", slug="kitchen-tools")
+
+        # "Kitch" exact-matches neither "Kitchen" nor "Kitchen Tools", so
+        # resolution falls through to the ambiguous icontains match.
+        with self.assertRaises(ValueError):
+            propose_create_product(self.seller, "Steel Kettle", "Kitch", "24.99", 10)
+
+    def test_propose_create_product_excludes_inactive_categories(self):
+        with self.assertRaises(ValueError):
+            propose_create_product(self.seller, "Old Stock", "Discontinued", "24.99", 10)
+
+    def test_propose_create_product_zero_price_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            propose_create_product(self.seller, "Freebie", "Kitchen", "0", 10)
+
+    def test_propose_create_product_negative_stock_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            propose_create_product(self.seller, "Steel Kettle", "Kitchen", "24.99", -5)
+
+    def test_execute_create_product_creates_product_owned_by_seller(self):
+        result = execute_create_product(
+            self.seller, name="Steel Kettle", category_id=self.category.id, price="24.99", stock=10,
+        )
+
+        self.assertEqual(result["field"], "listing")
+        self.assertEqual(result["new_value"], "created")
+        product = Product.objects.get(id=result["product_id"])
+        self.assertEqual(product.seller, self.seller)
+        self.assertEqual(product.category, self.category)
+        self.assertEqual(product.price, Decimal("24.99"))
+        self.assertEqual(product.stock, 10)
+
+    def test_execute_create_product_invalid_category_id_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            execute_create_product(self.seller, name="Steel Kettle", category_id=999999, price="24.99", stock=10)
+
+
 class RunWithToolsTests(TestCase):
     def setUp(self):
         self.seller = User.objects.create_user(
@@ -1074,6 +1147,60 @@ class ConfirmSellerActionViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.product.refresh_from_db()
         self.assertTrue(self.product.is_active)
+
+    def test_confirm_create_product_persists_new_product_owned_by_seller(self):
+        self._auth_as(self.seller)
+        payload = {
+            "action": "create_product",
+            "name": "Steel Kettle",
+            "category_id": self.category.id,
+            "price": "24.99",
+            "stock": 10,
+        }
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["product_name"], "Steel Kettle")
+        product = Product.objects.get(id=response.data["product_id"])
+        self.assertEqual(product.seller, self.seller)
+        self.assertEqual(product.price, Decimal("24.99"))
+        self.assertEqual(product.stock, 10)
+
+    def test_confirm_create_product_missing_fields_returns_400(self):
+        self._auth_as(self.seller)
+        payload = {"action": "create_product", "name": "Steel Kettle", "category_id": self.category.id}
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_confirm_create_product_invalid_category_returns_400_and_does_not_create(self):
+        self._auth_as(self.seller)
+        payload = {
+            "action": "create_product",
+            "name": "Steel Kettle",
+            "category_id": 999999,
+            "price": "24.99",
+            "stock": 10,
+        }
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name="Steel Kettle").exists())
+
+    def test_confirm_create_product_negative_stock_returns_400_and_does_not_create(self):
+        self._auth_as(self.seller)
+        payload = {
+            "action": "create_product",
+            "name": "Steel Kettle",
+            "category_id": self.category.id,
+            "price": "24.99",
+            "stock": -1,
+        }
+        response = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Product.objects.filter(name="Steel Kettle").exists())
 
     @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_seller_action": "1/minute"})
     def test_throttle_returns_429_when_scope_limit_exceeded(self):

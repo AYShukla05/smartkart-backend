@@ -11,6 +11,7 @@ PROPOSAL_TOOL_NAMES = frozenset({
     "propose_stock_update",
     "propose_price_update",
     "propose_toggle_product_active",
+    "propose_create_product",
 })
 
 PROPOSE_STOCK_UPDATE_DEFINITION = {
@@ -89,6 +90,58 @@ PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION = {
 }
 
 
+PROPOSE_CREATE_PRODUCT_DEFINITION = {
+    "name": "propose_create_product",
+    "description": (
+        "Propose creating a brand-new product listing for this seller. This does NOT "
+        "create anything yet - the seller must explicitly confirm the proposal in the "
+        "UI before the listing goes live. Use this when the seller asks to add, create, "
+        "or list a new product. The category must be one of SmartKart's existing "
+        "categories (e.g. 'Electronics', 'Home & Kitchen') - if you're not sure it "
+        "exists, propose it anyway and relay any error back to the seller."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The new product's name.",
+            },
+            "category": {
+                "type": "string",
+                "description": "The name of the category this product belongs to, e.g. 'Electronics'.",
+            },
+            "price": {
+                "type": "string",
+                "description": "The product's price, e.g. '29.99'.",
+            },
+            "stock": {
+                "type": "integer",
+                "description": "Initial stock count.",
+            },
+        },
+        "required": ["name", "category", "price", "stock"],
+    },
+}
+
+
+def _resolve_category(name):
+    from categories.models import Category
+
+    cleaned = str(name).strip()
+    matches = Category.objects.filter(is_active=True, name__iexact=cleaned)
+    if not matches.exists():
+        matches = Category.objects.filter(is_active=True, name__icontains=cleaned)
+
+    count = matches.count()
+    if count == 0:
+        raise ValueError(f"No category found matching '{name}'.")
+    if count > 1:
+        names = ", ".join(matches.order_by("name").values_list("name", flat=True))
+        raise ValueError(f"'{name}' matches multiple categories: {names}. Please specify one exactly.")
+    return matches.first()
+
+
 def propose_stock_update(seller, product_id, new_stock):
     # seller=seller filter is what prevents proposing changes to another seller's product
     product = Product.objects.get(id=product_id, seller=seller)
@@ -136,6 +189,28 @@ def propose_toggle_product_active(seller, product_id, new_active):
         "field": "status",
         "current_value": "active" if product.is_active else "inactive",
         "new_value": "active" if new_active else "inactive",
+    }
+
+
+def propose_create_product(seller, name, category, price, stock):
+    from products.serializers import ProductCreateUpdateSerializer
+
+    category_obj = _resolve_category(category)
+    serializer = ProductCreateUpdateSerializer(data={
+        "name": name, "category": category_obj.id, "price": price, "stock": stock,
+    })
+    if not serializer.is_valid():
+        raise ValueError("; ".join(f"{field}: {errors[0]}" for field, errors in serializer.errors.items()))
+
+    validated = serializer.validated_data
+    return {
+        "action": "create_product",
+        "product_id": None,
+        "product_name": validated["name"],
+        "summary": f"{category_obj.name} · ${validated['price']} · {validated['stock']} in stock",
+        "category_id": category_obj.id,
+        "price": str(validated["price"]),
+        "stock": validated["stock"],
     }
 
 
@@ -197,20 +272,46 @@ def execute_toggle_product_active(seller, product_id, new_value):
     }
 
 
+def execute_create_product(seller, name, category_id, price, stock):
+    """Only ever called from ConfirmSellerActionView - never reachable from the LLM loop.
+
+    Re-validates from scratch (not just re-saving the proposal's numbers) since the
+    category could have been deactivated between the proposal and confirmation.
+    """
+    from products.serializers import ProductCreateUpdateSerializer
+
+    serializer = ProductCreateUpdateSerializer(data={
+        "name": name, "category": category_id, "price": price, "stock": stock,
+    })
+    if not serializer.is_valid():
+        raise ValueError("; ".join(f"{field}: {errors[0]}" for field, errors in serializer.errors.items()))
+
+    product = serializer.save(seller=seller)
+    return {
+        "product_id": product.id,
+        "product_name": product.name,
+        "field": "listing",
+        "new_value": "created",
+    }
+
+
 SELLER_ACTION_DEFINITIONS = [
     PROPOSE_STOCK_UPDATE_DEFINITION,
     PROPOSE_PRICE_UPDATE_DEFINITION,
     PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION,
+    PROPOSE_CREATE_PRODUCT_DEFINITION,
 ]
 
 SELLER_ACTION_PROPOSE_EXECUTORS = {
     "propose_stock_update": propose_stock_update,
     "propose_price_update": propose_price_update,
     "propose_toggle_product_active": propose_toggle_product_active,
+    "propose_create_product": propose_create_product,
 }
 
 SELLER_ACTION_CONFIRM_EXECUTORS = {
     "update_product_stock": execute_stock_update,
     "update_product_price": execute_price_update,
     "toggle_product_active": execute_toggle_product_active,
+    "create_product": execute_create_product,
 }

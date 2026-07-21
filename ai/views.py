@@ -126,20 +126,36 @@ class ConfirmSellerActionView(APIView):
 
     def post(self, request):
         action = request.data.get("action")
-        product_id = request.data.get("product_id")
-        new_value = request.data.get("new_value")
-
         executor = SELLER_ACTION_CONFIRM_EXECUTORS.get(action)
         if executor is None:
             return Response({"detail": "Unknown action."}, status=status.HTTP_400_BAD_REQUEST)
-        if product_id in (None, "") or new_value in (None, ""):
-            return Response(
-                {"detail": "product_id and new_value are required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+
+        # create_product has no product_id yet and needs several fields rather
+        # than a single new_value, so it takes its own request shape.
+        if action == "create_product":
+            kwargs = {
+                "name": request.data.get("name"),
+                "category_id": request.data.get("category_id"),
+                "price": request.data.get("price"),
+                "stock": request.data.get("stock"),
+            }
+            if any(v in (None, "") for v in kwargs.values()):
+                return Response(
+                    {"detail": "name, category_id, price, and stock are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            product_id = request.data.get("product_id")
+            new_value = request.data.get("new_value")
+            if product_id in (None, "") or new_value in (None, ""):
+                return Response(
+                    {"detail": "product_id and new_value are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            kwargs = {"product_id": product_id, "new_value": new_value}
 
         try:
-            result = executor(seller=request.user, product_id=product_id, new_value=new_value)
+            result = executor(seller=request.user, **kwargs)
         except Product.DoesNotExist:
             return Response({"detail": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
         except (ValueError, TypeError):

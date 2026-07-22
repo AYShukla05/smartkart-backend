@@ -8,11 +8,19 @@ from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
 
 from products.models import Product
-from users.permissions import IsSeller
+from users.permissions import IsBuyer, IsSeller
+from .models import Conversation, Message
 from .parsers import DescriptionStreamParser
-from .prompts import DESCRIPTION_SYSTEM_PROMPT, SELLER_ASSISTANT_SYSTEM_PROMPT, build_description_prompt
+from .prompts import (
+    DESCRIPTION_SYSTEM_PROMPT,
+    ORDER_ASSISTANT_SYSTEM_PROMPT,
+    SELLER_ASSISTANT_SYSTEM_PROMPT,
+    build_description_prompt,
+)
+from .services.context import build_message_history
 from .services.llm_client import stream, LLMGenerationError
 from .services.tool_runner import run_with_tools
+from .tools.buyer_tools import BUYER_TOOL_DEFINITIONS, BUYER_TOOL_EXECUTORS
 from .tools.seller_actions import (
     PROPOSAL_TOOL_NAMES,
     SELLER_ACTION_CONFIRM_EXECUTORS,
@@ -162,3 +170,67 @@ class ConfirmSellerActionView(APIView):
             return Response({"detail": "Invalid value for this action."}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"success": True, **result})
+
+
+class BuyerOrderAssistantView(APIView):
+    permission_classes = [IsBuyer]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_order_assistant"
+
+    def post(self, request):
+        message_text = str(request.data.get("message", "")).strip()
+        conversation_id = request.data.get("conversation_id")
+
+        if not message_text:
+            return Response(
+                {"detail": "message is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if conversation_id:
+            try:
+                conversation = Conversation.objects.get(
+                    id=conversation_id,
+                    user=request.user,  # ownership enforced here
+                )
+            except Conversation.DoesNotExist:
+                return Response(
+                    {"detail": "Conversation not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            conversation = Conversation.objects.create(user=request.user)
+
+        # Built from messages already in the DB, before this turn's user
+        # message is persisted below - otherwise that message would show up
+        # twice in a row (once as the last history entry, once again as the
+        # prompt run_with_tools appends), which the Anthropic API rejects.
+        history = build_message_history(conversation)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.ROLE_USER,
+            content=message_text,
+        )
+
+        reply = run_with_tools(
+            prompt=message_text,
+            system=ORDER_ASSISTANT_SYSTEM_PROMPT,
+            tool_definitions=BUYER_TOOL_DEFINITIONS,
+            tool_executors=BUYER_TOOL_EXECUTORS,
+            actor=request.user,
+            actor_kwarg="user",
+            max_tool_calls=5,
+            prior_messages=history,
+        )
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.ROLE_ASSISTANT,
+            content=reply.text,
+        )
+
+        return Response({
+            "response": reply.text,
+            "conversation_id": conversation.id,
+        })

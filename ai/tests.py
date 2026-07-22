@@ -17,12 +17,14 @@ from categories.models import Category
 from orders.models import Order, OrderItem
 from products.models import Product
 from users.models import User
-from ai.models import ProductEmbedding
+from ai.models import Conversation, Message, ProductEmbedding
 from ai.parsers import DescriptionStreamParser, parse_description_json
 from ai.prompts import build_description_prompt
+from ai.services.context import build_message_history
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
+from ai.tools.buyer_tools import get_my_orders, get_order_detail
 from ai.tools.seller_actions import execute_create_product, propose_create_product
 from ai.tools.seller_tools import (
     find_product_by_name,
@@ -1427,4 +1429,269 @@ class ConfirmSellerActionViewTests(TestCase):
         self.assertEqual(first.status_code, 200)
 
         second = self.client.post(self.url, self._payload(new_value=11), format="json")
+        self.assertEqual(second.status_code, 429)
+
+
+class BuyerToolsTests(TestCase):
+    """Ownership scoping is a query-level guarantee, not a prompt instruction -
+    these test the executors directly, independent of the tool-calling loop."""
+
+    def setUp(self):
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.other_buyer = User.objects.create_user(
+            email="other-buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.category = Category.objects.create(name="Kitchen", slug="kitchen")
+        self.product = Product.objects.create(
+            seller=self.seller, category=self.category, name="Steel Mug",
+            price=Decimal("10.00"), stock=50,
+        )
+
+    def _create_order(self, buyer, quantity=1, price=None, created_at=None, order_status=Order.Status.PLACED):
+        price = price if price is not None else self.product.price
+        order = Order.objects.create(buyer=buyer, total_amount=price * quantity, status=order_status)
+        OrderItem.objects.create(
+            order=order, product=self.product, seller=self.seller,
+            quantity=quantity, price_at_purchase=price,
+        )
+        if created_at is not None:
+            Order.objects.filter(id=order.id).update(created_at=created_at)
+        return order
+
+    def test_get_my_orders_excludes_other_buyers_orders(self):
+        mine = self._create_order(self.buyer)
+        self._create_order(self.other_buyer)
+
+        results = get_my_orders(self.buyer)
+
+        self.assertEqual([o["id"] for o in results], [mine.id])
+
+    def test_get_my_orders_respects_days_filter(self):
+        self._create_order(self.buyer, created_at=timezone.now() - timedelta(days=60))
+        recent = self._create_order(self.buyer)
+
+        results = get_my_orders(self.buyer, days=30)
+
+        self.assertEqual([o["id"] for o in results], [recent.id])
+
+    def test_get_my_orders_respects_status_filter(self):
+        placed = self._create_order(self.buyer, order_status=Order.Status.PLACED)
+        self._create_order(self.buyer, order_status=Order.Status.CANCELLED)
+
+        results = get_my_orders(self.buyer, status="PLACED")
+
+        self.assertEqual([o["id"] for o in results], [placed.id])
+
+    def test_get_my_orders_respects_limit(self):
+        for _ in range(3):
+            self._create_order(self.buyer)
+
+        results = get_my_orders(self.buyer, limit=2)
+
+        self.assertEqual(len(results), 2)
+
+    def test_get_my_orders_total_matches_order_total_amount(self):
+        order = self._create_order(self.buyer, quantity=2, price=Decimal("10.00"))
+
+        results = get_my_orders(self.buyer)
+
+        self.assertEqual(Decimal(results[0]["total"]), order.total_amount)
+
+    def test_get_order_detail_includes_seller_email_per_item(self):
+        order = self._create_order(self.buyer)
+
+        result = get_order_detail(self.buyer, order.id)
+
+        self.assertEqual(result["items"][0]["seller"], self.seller.email)
+
+    def test_get_order_detail_cross_buyer_raises_does_not_exist(self):
+        order = self._create_order(self.other_buyer)
+
+        with self.assertRaises(Order.DoesNotExist):
+            get_order_detail(self.buyer, order.id)
+
+
+class ConversationModelTests(TestCase):
+    def setUp(self):
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+
+    def test_get_recent_messages_returns_last_n_in_chronological_order(self):
+        conversation = Conversation.objects.create(user=self.buyer)
+        base = timezone.now() - timedelta(minutes=30)
+        for i in range(25):
+            message = Message.objects.create(
+                conversation=conversation,
+                role=Message.ROLE_USER if i % 2 == 0 else Message.ROLE_ASSISTANT,
+                content=f"message {i}",
+            )
+            # Explicit, distinct timestamps - 25 rapid in-test creates can tie
+            # at auto_now_add's resolution, which would make ordering flaky.
+            Message.objects.filter(id=message.id).update(created_at=base + timedelta(seconds=i))
+
+        recent = conversation.get_recent_messages(n=20)
+
+        self.assertEqual(len(recent), 20)
+        self.assertEqual([m.content for m in recent], [f"message {i}" for i in range(5, 25)])
+
+    def test_build_message_history_caps_at_the_configured_window(self):
+        conversation = Conversation.objects.create(user=self.buyer)
+        base = timezone.now() - timedelta(minutes=30)
+        for i in range(15):
+            message = Message.objects.create(
+                conversation=conversation,
+                role=Message.ROLE_USER if i % 2 == 0 else Message.ROLE_ASSISTANT,
+                content=f"message {i}",
+            )
+            Message.objects.filter(id=message.id).update(created_at=base + timedelta(seconds=i))
+
+        history = build_message_history(conversation)
+
+        # Cost-driven default: 5 messages, not 20 - see
+        # ai/services/context.py's HISTORY_WINDOW comment.
+        self.assertEqual(len(history), 5)
+        self.assertEqual([m["content"] for m in history], [f"message {i}" for i in range(10, 15)])
+
+
+class BuyerOrderAssistantViewTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.other_buyer = User.objects.create_user(
+            email="other-buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.url = "/api/ai/order-assistant/"
+
+    def _auth_as(self, user):
+        token = RefreshToken.for_user(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token.access_token}")
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.post(self.url, {"message": "hi"}, format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_seller_request_returns_403(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, {"message": "hi"}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_empty_message_returns_400(self):
+        self._auth_as(self.buyer)
+        response = self.client.post(self.url, {"message": "   "}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_first_message_creates_conversation_owned_by_buyer(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Hi there!")])
+        self._auth_as(self.buyer)
+
+        response = self.client.post(self.url, {"message": "hi"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        conversation = Conversation.objects.get(id=response.data["conversation_id"])
+        self.assertEqual(conversation.user, self.buyer)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_user_and_assistant_messages_are_persisted(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Hi there!")])
+        self._auth_as(self.buyer)
+
+        response = self.client.post(self.url, {"message": "hi"}, format="json")
+
+        conversation = Conversation.objects.get(id=response.data["conversation_id"])
+        roles_and_content = [(m.role, m.content) for m in conversation.messages.all()]
+        self.assertEqual(
+            roles_and_content,
+            [(Message.ROLE_USER, "hi"), (Message.ROLE_ASSISTANT, "Hi there!")],
+        )
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_second_message_reuses_conversation_and_history_is_not_duplicated(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_text_block("Hello! How can I help?")]),
+            _tool_response([_text_block("Sure, here you go.")]),
+        ]
+        self._auth_as(self.buyer)
+
+        first = self.client.post(self.url, {"message": "hi"}, format="json")
+        conversation_id = first.data["conversation_id"]
+
+        second = self.client.post(
+            self.url, {"message": "tell me more", "conversation_id": conversation_id}, format="json",
+        )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["conversation_id"], conversation_id)
+
+        # Regression guard: the prior exchange must appear exactly once,
+        # immediately followed by the new prompt - not duplicated by also
+        # being the last entry in prior_messages AND re-appended as prompt.
+        second_call_messages = mock_call.call_args_list[1].args[0]
+        self.assertEqual(
+            second_call_messages,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Hello! How can I help?"},
+                {"role": "user", "content": "tell me more"},
+            ],
+        )
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_conversation_belonging_to_different_buyer_returns_404(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Hi there!")])
+        self._auth_as(self.buyer)
+        first = self.client.post(self.url, {"message": "hi"}, format="json")
+        conversation_id = first.data["conversation_id"]
+
+        self._auth_as(self.other_buyer)
+        response = self.client.post(
+            self.url, {"message": "hi again", "conversation_id": conversation_id}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_unknown_conversation_id_returns_404(self):
+        self._auth_as(self.buyer)
+        response = self.client.post(
+            self.url, {"message": "hi", "conversation_id": 999999}, format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_tool_executor_is_called_with_the_authenticated_buyer_as_user_kwarg(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_my_orders", {})]),
+            _tool_response([_text_block("You have no orders.")]),
+        ]
+        mock_executor = MagicMock(return_value=[])
+        self._auth_as(self.buyer)
+
+        with patch.dict("ai.views.BUYER_TOOL_EXECUTORS", {"get_my_orders": mock_executor}):
+            response = self.client.post(self.url, {"message": "my orders?"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        mock_executor.assert_called_once_with(user=self.buyer)
+
+    @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_order_assistant": "1/minute"})
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_throttle_returns_429_when_scope_limit_exceeded(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("done")])
+        self._auth_as(self.buyer)
+
+        first = self.client.post(self.url, {"message": "hi"}, format="json")
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(self.url, {"message": "hi"}, format="json")
         self.assertEqual(second.status_code, 429)

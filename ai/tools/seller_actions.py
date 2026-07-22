@@ -3,10 +3,11 @@ from decimal import Decimal, InvalidOperation
 from products.models import Product
 
 # Names of tools that PROPOSE a change rather than performing it. The
-# tool-calling loop treats these specially: it captures the structured
-# proposal and stops, instead of letting the model keep chaining calls.
-# The model can request a proposal; only a seller's explicit confirmation
-# (via ConfirmSellerActionView, never through the LLM loop) executes it.
+# tool-calling loop treats these specially: it collects every structured
+# proposal made during the turn (the model can chain more calls afterwards,
+# e.g. to propose a second change). The model can request as many proposals
+# as it wants; only a seller's explicit confirmation (via
+# ConfirmSellerActionView, never through the LLM loop) executes any of them.
 PROPOSAL_TOOL_NAMES = frozenset({
     "propose_stock_update",
     "propose_price_update",

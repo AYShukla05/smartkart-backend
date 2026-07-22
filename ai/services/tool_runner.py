@@ -1,5 +1,5 @@
 import logging
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from django.contrib.auth import get_user_model
 
@@ -15,15 +15,23 @@ GENERATION_FAILED_MESSAGE = "I'm having trouble answering right now. Please try 
 
 class AssistantReply(NamedTuple):
     text: str
-    pending_action: Optional[dict]
+    pending_actions: list
 
 
-def _default_proposal_text(pending_action):
+def _describe_proposal(action):
+    if action.get("summary"):
+        return f"create a new listing: {action['product_name']} — {action['summary']}"
     return (
-        f"I'd like to update {pending_action['product_name']}'s {pending_action['field']} "
-        f"from {pending_action['current_value']} to {pending_action['new_value']}. "
-        "Please confirm to proceed."
+        f"update {action['product_name']}'s {action['field']} "
+        f"from {action['current_value']} to {action['new_value']}"
     )
+
+
+def _default_proposal_text(pending_actions):
+    if len(pending_actions) == 1:
+        return f"I'd like to {_describe_proposal(pending_actions[0])}. Please confirm to proceed."
+    lines = "\n".join(f"- {_describe_proposal(action)}" for action in pending_actions)
+    return f"I'd like to make the following changes:\n{lines}\nPlease confirm to proceed."
 
 
 def run_with_tools(
@@ -43,41 +51,46 @@ def run_with_tools(
     matter what arguments the model passes.
 
     Tools named in `proposal_tool_names` never mutate anything themselves -
-    they return a structured proposal. As soon as one succeeds, the loop
-    captures it, makes one final call so the model can phrase a confirmation
-    sentence, and returns - it never lets the model chain further tool calls
-    once a mutation has been proposed. The proposal is only ever carried out
-    by a separate, explicit confirmation step outside this loop entirely.
+    they return a structured proposal. Every proposal made during the turn is
+    collected into `pending_actions`; the model is free to keep chaining
+    further tool calls afterwards (more proposals, or lookups) up to
+    max_tool_calls, so asking for two changes in one message can surface two
+    confirm cards. None of them are ever carried out here - each is only
+    ever executed by a separate, explicit confirmation step outside this
+    loop entirely.
     """
     messages = [{"role": "user", "content": prompt}]
     tool_calls_made = 0
+    pending_actions = []
 
     while True:
         try:
             response = call_with_tools(messages, system, tool_definitions)
         except LLMGenerationError:
             logger.error("Seller assistant call_with_tools() failed for seller_id=%s", seller.id, exc_info=True)
-            return AssistantReply(GENERATION_FAILED_MESSAGE, None)
+            return AssistantReply(GENERATION_FAILED_MESSAGE, pending_actions)
 
         tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
         text_blocks = [block for block in response.content if block.type == "text"]
 
         if not tool_use_blocks:
-            return AssistantReply("".join(block.text for block in text_blocks), None)
+            text = "".join(block.text for block in text_blocks)
+            if not text and pending_actions:
+                text = _default_proposal_text(pending_actions)
+            return AssistantReply(text, pending_actions)
 
         if tool_calls_made + len(tool_use_blocks) > max_tool_calls:
             logger.warning("Seller assistant hit max_tool_calls=%s for seller_id=%s", max_tool_calls, seller.id)
-            return AssistantReply(MAX_TOOL_CALLS_REACHED_MESSAGE, None)
+            return AssistantReply(MAX_TOOL_CALLS_REACHED_MESSAGE, pending_actions)
 
         messages.append({"role": "assistant", "content": response.content})
 
         tool_results = []
-        pending_action = None
         for block in tool_use_blocks:
             try:
                 result = tool_executors[block.name](seller=seller, **block.input)
-                if block.name in proposal_tool_names and pending_action is None:
-                    pending_action = result
+                if block.name in proposal_tool_names:
+                    pending_actions.append(result)
             except Exception as e:
                 logger.warning("Tool %s failed for seller_id=%s: %s", block.name, seller.id, e, exc_info=True)
                 result = f"Error calling {block.name}: {str(e)}"
@@ -89,16 +102,3 @@ def run_with_tools(
             tool_calls_made += 1
 
         messages.append({"role": "user", "content": tool_results})
-
-        if pending_action is not None:
-            try:
-                closing_response = call_with_tools(messages, system, tool_definitions)
-                closing_text = "".join(
-                    block.text for block in closing_response.content if block.type == "text"
-                )
-            except LLMGenerationError:
-                logger.error(
-                    "Seller assistant closing call_with_tools() failed for seller_id=%s", seller.id, exc_info=True
-                )
-                closing_text = ""
-            return AssistantReply(closing_text or _default_proposal_text(pending_action), pending_action)

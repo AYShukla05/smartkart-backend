@@ -834,7 +834,7 @@ class RunWithToolsTests(TestCase):
         reply = run_with_tools("hi", "sys", [], {}, self.seller)
 
         self.assertEqual(reply.text, "Hello seller")
-        self.assertIsNone(reply.pending_action)
+        self.assertEqual(reply.pending_actions, [])
         self.assertEqual(mock_call.call_count, 1)
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -852,7 +852,7 @@ class RunWithToolsTests(TestCase):
         reply = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller)
 
         self.assertEqual(reply.text, "done")
-        self.assertIsNone(reply.pending_action)
+        self.assertEqual(reply.pending_actions, [])
         self.assertEqual(calls, [(self.seller, 1)])
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -867,7 +867,7 @@ class RunWithToolsTests(TestCase):
         reply = run_with_tools("hi", "sys", [], {"get_thing": executor}, self.seller, max_tool_calls=5)
 
         self.assertEqual(reply.text, MAX_TOOL_CALLS_REACHED_MESSAGE)
-        self.assertIsNone(reply.pending_action)
+        self.assertEqual(reply.pending_actions, [])
         self.assertEqual(len(calls), 5)
 
     @patch("ai.services.tool_runner.call_with_tools")
@@ -894,13 +894,13 @@ class RunWithToolsTests(TestCase):
         reply = run_with_tools("hi", "sys", [], {}, self.seller)
 
         self.assertEqual(reply.text, GENERATION_FAILED_MESSAGE)
-        self.assertIsNone(reply.pending_action)
+        self.assertEqual(reply.pending_actions, [])
 
     @patch("ai.services.tool_runner.call_with_tools")
-    def test_proposal_tool_is_captured_and_loop_stops_after_one_closing_call(self, mock_call):
+    def test_proposal_tool_is_captured_and_surfaced_in_pending_actions(self, mock_call):
         mock_call.side_effect = [
             _tool_response([_tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50})]),
-            _tool_response([_text_block("Update stock to 50?"), _tool_use_block("get_seller_stats", {})]),
+            _tool_response([_text_block("Update stock to 50?")]),
         ]
 
         def propose(seller, product_id, new_stock):
@@ -915,13 +915,109 @@ class RunWithToolsTests(TestCase):
         )
 
         self.assertEqual(reply.text, "Update stock to 50?")
-        self.assertEqual(reply.pending_action["product_id"], 1)
-        self.assertEqual(reply.pending_action["new_value"], 50)
-        # The closing response's get_seller_stats tool_use must be ignored, not executed
+        self.assertEqual(len(reply.pending_actions), 1)
+        self.assertEqual(reply.pending_actions[0]["product_id"], 1)
+        self.assertEqual(reply.pending_actions[0]["new_value"], 50)
         self.assertEqual(mock_call.call_count, 2)
 
     @patch("ai.services.tool_runner.call_with_tools")
-    def test_failed_proposal_does_not_set_pending_action(self, mock_call):
+    def test_model_may_keep_chaining_calls_after_a_proposal(self, mock_call):
+        """The whole point of the fix: the loop no longer stops the instant a
+        proposal is captured - the model can chain a second proposal, or a
+        lookup, afterwards and both still surface."""
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50}, block_id="t1")]),
+            _tool_response([_tool_use_block("get_seller_stats", {}, block_id="t2")]),
+            _tool_response([_text_block("Updated stock, and here are your stats.")]),
+        ]
+
+        def propose(seller, product_id, new_stock):
+            return {
+                "action": "update_product_stock", "product_id": product_id,
+                "product_name": "Widget", "field": "stock", "current_value": 10, "new_value": new_stock,
+            }
+
+        stats_calls = []
+
+        def get_stats(seller):
+            stats_calls.append(seller)
+            return {"total_orders": 3}
+
+        reply = run_with_tools(
+            "update stock then tell me my stats", "sys", [],
+            {"propose_stock_update": propose, "get_seller_stats": get_stats}, self.seller,
+            proposal_tool_names={"propose_stock_update"},
+        )
+
+        self.assertEqual(reply.text, "Updated stock, and here are your stats.")
+        self.assertEqual(len(reply.pending_actions), 1)
+        self.assertEqual(stats_calls, [self.seller])
+        self.assertEqual(mock_call.call_count, 3)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_multiple_proposals_across_turns_are_all_captured(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50}, block_id="t1")]),
+            _tool_response([_tool_use_block("propose_price_update", {"product_id": 1, "new_price": "25.99"}, block_id="t2")]),
+            _tool_response([_text_block("I've proposed both changes.")]),
+        ]
+
+        def propose_stock(seller, product_id, new_stock):
+            return {
+                "action": "update_product_stock", "product_id": product_id,
+                "product_name": "Widget", "field": "stock", "current_value": 10, "new_value": new_stock,
+            }
+
+        def propose_price(seller, product_id, new_price):
+            return {
+                "action": "update_product_price", "product_id": product_id,
+                "product_name": "Widget", "field": "price", "current_value": "19.99", "new_value": new_price,
+            }
+
+        reply = run_with_tools(
+            "update stock and price", "sys", [],
+            {"propose_stock_update": propose_stock, "propose_price_update": propose_price}, self.seller,
+            proposal_tool_names={"propose_stock_update", "propose_price_update"},
+        )
+
+        self.assertEqual(reply.text, "I've proposed both changes.")
+        self.assertEqual(len(reply.pending_actions), 2)
+        self.assertEqual(reply.pending_actions[0]["field"], "stock")
+        self.assertEqual(reply.pending_actions[1]["field"], "price")
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_multiple_proposals_in_the_same_batch_are_all_captured(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([
+                _tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50}, block_id="t1"),
+                _tool_use_block("propose_price_update", {"product_id": 1, "new_price": "25.99"}, block_id="t2"),
+            ]),
+            _tool_response([_text_block("I've proposed both changes.")]),
+        ]
+
+        def propose_stock(seller, product_id, new_stock):
+            return {
+                "action": "update_product_stock", "product_id": product_id,
+                "product_name": "Widget", "field": "stock", "current_value": 10, "new_value": new_stock,
+            }
+
+        def propose_price(seller, product_id, new_price):
+            return {
+                "action": "update_product_price", "product_id": product_id,
+                "product_name": "Widget", "field": "price", "current_value": "19.99", "new_value": new_price,
+            }
+
+        reply = run_with_tools(
+            "update stock and price", "sys", [],
+            {"propose_stock_update": propose_stock, "propose_price_update": propose_price}, self.seller,
+            proposal_tool_names={"propose_stock_update", "propose_price_update"},
+        )
+
+        self.assertEqual(len(reply.pending_actions), 2)
+        self.assertEqual(mock_call.call_count, 2)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_failed_proposal_does_not_appear_in_pending_actions(self, mock_call):
         mock_call.side_effect = [
             _tool_response([_tool_use_block("propose_stock_update", {"product_id": 999, "new_stock": 50})]),
             _tool_response([_text_block("I couldn't find that product.")]),
@@ -936,10 +1032,10 @@ class RunWithToolsTests(TestCase):
         )
 
         self.assertEqual(reply.text, "I couldn't find that product.")
-        self.assertIsNone(reply.pending_action)
+        self.assertEqual(reply.pending_actions, [])
 
     @patch("ai.services.tool_runner.call_with_tools")
-    def test_proposal_closing_call_failure_still_returns_pending_action(self, mock_call):
+    def test_generation_error_after_proposal_still_returns_pending_actions(self, mock_call):
         mock_call.side_effect = [
             _tool_response([_tool_use_block("propose_price_update", {"product_id": 1, "new_price": "9.99"})]),
             LLMGenerationError("boom"),
@@ -956,8 +1052,31 @@ class RunWithToolsTests(TestCase):
             proposal_tool_names={"propose_price_update"},
         )
 
+        self.assertEqual(reply.text, GENERATION_FAILED_MESSAGE)
+        self.assertEqual(len(reply.pending_actions), 1)
+        self.assertEqual(reply.pending_actions[0]["new_value"], "9.99")
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_empty_final_text_falls_back_to_default_proposal_summary(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("propose_stock_update", {"product_id": 1, "new_stock": 50})]),
+            _tool_response([]),
+        ]
+
+        def propose(seller, product_id, new_stock):
+            return {
+                "action": "update_product_stock", "product_id": product_id,
+                "product_name": "Widget", "field": "stock", "current_value": 10, "new_value": new_stock,
+            }
+
+        reply = run_with_tools(
+            "update stock", "sys", [], {"propose_stock_update": propose}, self.seller,
+            proposal_tool_names={"propose_stock_update"},
+        )
+
         self.assertIn("Widget", reply.text)
-        self.assertEqual(reply.pending_action["new_value"], "9.99")
+        self.assertIn("stock", reply.text)
+        self.assertEqual(len(reply.pending_actions), 1)
 
 
 class SellerAssistantViewTests(TestCase):

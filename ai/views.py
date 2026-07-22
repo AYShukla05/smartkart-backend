@@ -116,7 +116,7 @@ class SellerAssistantView(APIView):
             max_tool_calls=5,
             proposal_tool_names=PROPOSAL_TOOL_NAMES,
         )
-        return Response({"response": reply.text, "pending_action": reply.pending_action})
+        return Response({"response": reply.text, "pending_actions": reply.pending_actions})
 
 
 class ConfirmSellerActionView(APIView):

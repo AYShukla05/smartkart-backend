@@ -1078,6 +1078,104 @@ class RunWithToolsTests(TestCase):
         self.assertIn("stock", reply.text)
         self.assertEqual(len(reply.pending_actions), 1)
 
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_actor_kwarg_controls_the_keyword_used_to_call_executors(self, mock_call):
+        """actor_kwarg defaults to "seller" (Phase 3 tools take `seller`) but
+        callers scoping to a different role, e.g. the buyer assistant's
+        `user`-keyword tools, pass a different name - the loop itself never
+        hardcodes a role."""
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_thing", {"x": 1})]),
+            _tool_response([_text_block("done")]),
+        ]
+        calls = []
+
+        def executor(user, x):
+            calls.append((user, x))
+            return "ok"
+
+        reply = run_with_tools(
+            "hi", "sys", [], {"get_thing": executor}, self.seller, actor_kwarg="user",
+        )
+
+        self.assertEqual(reply.text, "done")
+        self.assertEqual(calls, [(self.seller, 1)])
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_prior_messages_are_prepended_ahead_of_the_current_prompt(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("done")])
+
+        run_with_tools(
+            "current question", "sys", [], {}, self.seller,
+            prior_messages=[
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "earlier reply"},
+            ],
+        )
+
+        sent_messages = mock_call.call_args.args[0]
+        self.assertEqual(sent_messages, [
+            {"role": "user", "content": "earlier"},
+            {"role": "assistant", "content": "earlier reply"},
+            {"role": "user", "content": "current question"},
+        ])
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_last_product_id_captured_from_a_tool_call_with_a_product_id_argument(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_product_performance", {"product_id": 42})]),
+            _tool_response([_text_block("done")]),
+        ]
+
+        def get_product_performance(seller, product_id):
+            return {"name": "Widget", "current_stock": 5}
+
+        reply = run_with_tools(
+            "how's widget doing", "sys", [], {"get_product_performance": get_product_performance}, self.seller,
+        )
+
+        self.assertEqual(reply.last_product_id, 42)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_last_product_id_captured_from_a_single_find_product_by_name_match(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("find_product_by_name", {"name": "widget"})]),
+            _tool_response([_text_block("done")]),
+        ]
+
+        def find_product_by_name(seller, name):
+            return [{"id": 7, "name": "Widget"}]
+
+        reply = run_with_tools(
+            "find widget", "sys", [], {"find_product_by_name": find_product_by_name}, self.seller,
+        )
+
+        self.assertEqual(reply.last_product_id, 7)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_last_product_id_not_captured_from_an_ambiguous_find_product_by_name_match(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("find_product_by_name", {"name": "widget"})]),
+            _tool_response([_text_block("Which one did you mean?")]),
+        ]
+
+        def find_product_by_name(seller, name):
+            return [{"id": 7, "name": "Widget A"}, {"id": 8, "name": "Widget B"}]
+
+        reply = run_with_tools(
+            "find widget", "sys", [], {"find_product_by_name": find_product_by_name}, self.seller,
+        )
+
+        self.assertIsNone(reply.last_product_id)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_last_product_id_defaults_to_none_when_no_product_tool_is_called(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Hello")])
+
+        reply = run_with_tools("hi", "sys", [], {}, self.seller)
+
+        self.assertIsNone(reply.last_product_id)
+
 
 class SellerAssistantViewTests(TestCase):
     def setUp(self):

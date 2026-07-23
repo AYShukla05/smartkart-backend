@@ -73,7 +73,7 @@ def stream(prompt, system=None, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKE
         raise LLMGenerationError("Failed to generate text.")
 
 
-def call_with_tools(messages, system, tools, model=DEFAULT_MODEL, max_tokens=1000):
+def call_with_tools(messages, system, tools, model=DEFAULT_MODEL, max_tokens=700):
     """Make a single call to the model with tool definitions.
 
     Returns the raw Anthropic API response object. Makes exactly one API

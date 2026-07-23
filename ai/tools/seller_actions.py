@@ -18,10 +18,9 @@ PROPOSAL_TOOL_NAMES = frozenset({
 PROPOSE_STOCK_UPDATE_DEFINITION = {
     "name": "propose_stock_update",
     "description": (
-        "Propose updating a product's stock count. This does NOT change anything yet - "
-        "the seller must explicitly confirm the proposal in the UI before it takes effect. "
-        "Use this whenever the seller asks to change, update, restock, or set stock for a "
-        "specific product. Never claim the stock has already been updated."
+        "Propose updating a product's stock count - does NOT apply until the seller confirms "
+        "in the UI. Use when asked to change, update, restock, or set stock for a product. "
+        "Never say the stock is already updated."
     ),
     "input_schema": {
         "type": "object",
@@ -42,10 +41,9 @@ PROPOSE_STOCK_UPDATE_DEFINITION = {
 PROPOSE_PRICE_UPDATE_DEFINITION = {
     "name": "propose_price_update",
     "description": (
-        "Propose updating a product's price. This does NOT change anything yet - the "
-        "seller must explicitly confirm the proposal in the UI before it takes effect. "
-        "Use this whenever the seller asks to change, update, or set the price for a "
-        "specific product. Never claim the price has already been updated."
+        "Propose updating a product's price - does NOT apply until the seller confirms in "
+        "the UI. Use when asked to change, update, or set the price for a product. "
+        "Never say the price is already updated."
     ),
     "input_schema": {
         "type": "object",
@@ -67,12 +65,10 @@ PROPOSE_PRICE_UPDATE_DEFINITION = {
 PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION = {
     "name": "propose_toggle_product_active",
     "description": (
-        "Propose activating or deactivating one of this seller's product listings. "
-        "A deactivated product is hidden from buyers but not deleted, and can be "
-        "reactivated later. This does NOT change anything yet - the seller must "
-        "explicitly confirm the proposal in the UI before it takes effect. Use this "
-        "when the seller asks to deactivate, hide, pause, delist, reactivate, or "
-        "relist a specific product. Never claim the change has already been made."
+        "Propose activating or deactivating a product listing (deactivated = hidden from "
+        "buyers, not deleted, can be reactivated) - does NOT apply until the seller confirms "
+        "in the UI. Use when asked to deactivate, hide, pause, delist, reactivate, or relist "
+        "a product. Never say the change is already made."
     ),
     "input_schema": {
         "type": "object",
@@ -94,12 +90,10 @@ PROPOSE_TOGGLE_PRODUCT_ACTIVE_DEFINITION = {
 PROPOSE_CREATE_PRODUCT_DEFINITION = {
     "name": "propose_create_product",
     "description": (
-        "Propose creating a brand-new product listing for this seller. This does NOT "
-        "create anything yet - the seller must explicitly confirm the proposal in the "
-        "UI before the listing goes live. Use this when the seller asks to add, create, "
-        "or list a new product. The category must be one of SmartKart's existing "
-        "categories (e.g. 'Electronics', 'Home & Kitchen') - if you're not sure it "
-        "exists, propose it anyway and relay any error back to the seller."
+        "Propose a brand-new product listing - does NOT go live until the seller confirms "
+        "in the UI. Use when asked to add, create, or list a new product. Category must be "
+        "an existing SmartKart category (e.g. 'Electronics') - if unsure it exists, propose "
+        "anyway and relay any error back to the seller."
     ),
     "input_schema": {
         "type": "object",

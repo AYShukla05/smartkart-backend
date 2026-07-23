@@ -8,10 +8,7 @@ from products.models import Product
 
 GET_SELLER_STATS_DEFINITION = {
     "name": "get_seller_stats",
-    "description": (
-        "Get this seller's total orders, total revenue, and product count. "
-        "Optionally filtered to a recent time window."
-    ),
+    "description": "This seller's total orders, revenue, and product count, optionally filtered to a recent window.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -46,10 +43,7 @@ def get_seller_stats(seller, days=None):
 
 GET_TOP_SELLING_PRODUCTS_DEFINITION = {
     "name": "get_top_selling_products",
-    "description": (
-        "Get this seller's best-selling products, ranked by total units sold. "
-        "Optionally filtered to a recent time window."
-    ),
+    "description": "This seller's best-selling products, ranked by units sold, optionally filtered to a recent window.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -95,9 +89,8 @@ def get_top_selling_products(seller, limit=5, days=None):
 GET_CATEGORY_BREAKDOWN_DEFINITION = {
     "name": "get_category_breakdown",
     "description": (
-        "Get this seller's sales broken down by product category - units sold and "
-        "revenue per category. Optionally filtered to a recent time window. Use this "
-        "for questions like 'which category sells best for me'."
+        "This seller's sales by category - units and revenue per category, "
+        "optionally filtered to a recent window. Use for 'which category sells best for me'-type questions."
     ),
     "input_schema": {
         "type": "object",
@@ -138,10 +131,8 @@ def get_category_breakdown(seller, days=None):
 GET_RECENT_ORDERS_DEFINITION = {
     "name": "get_recent_orders",
     "description": (
-        "Get this seller's most recent orders. Each entry is one of this seller's "
-        "product line items sold as part of an order, with that order's status and "
-        "date. Use this for questions like 'what did I just sell' or 'show me my "
-        "recent orders', as opposed to aggregate sales stats."
+        "This seller's most recent orders, one line item per sale, with status and date. "
+        "Use for 'what did I just sell' / 'recent orders', not aggregate sales stats."
     ),
     "input_schema": {
         "type": "object",
@@ -178,7 +169,7 @@ def get_recent_orders(seller, limit=10):
 
 GET_LOW_STOCK_DEFINITION = {
     "name": "get_low_stock_products",
-    "description": "Get this seller's products that are low in stock or out of stock.",
+    "description": "This seller's products that are low or out of stock.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -204,10 +195,8 @@ def get_low_stock_products(seller, threshold=10):
 GET_LOWEST_STOCK_PRODUCTS_DEFINITION = {
     "name": "get_lowest_stock_products",
     "description": (
-        "Get this seller's products with the least stock, ranked lowest first, "
-        "regardless of any threshold. Use this for questions like 'what's my "
-        "lowest stock item' - use get_low_stock_products instead for questions "
-        "like 'what's below 10 units'."
+        "This seller's products with the least stock, lowest first, regardless of threshold. "
+        "Use for 'what's my lowest stock item' - use get_low_stock_products for 'what's below 10 units'."
     ),
     "input_schema": {
         "type": "object",
@@ -233,11 +222,9 @@ def get_lowest_stock_products(seller, limit=5):
 FIND_PRODUCT_BY_NAME_DEFINITION = {
     "name": "find_product_by_name",
     "description": (
-        "Search this seller's own products by name to find a product's ID. "
-        "Use this whenever the seller refers to a product by name rather than by "
-        "ID - sellers don't track IDs, so this is usually the first step before "
-        "any action that requires a product_id (generating a description, or "
-        "proposing a stock/price update)."
+        "Search this seller's products by name to get its ID. Use whenever the seller names a "
+        "product instead of giving an ID - the usual first step before any action needing "
+        "product_id (description generation, stock/price proposals)."
     ),
     "input_schema": {
         "type": "object",
@@ -263,10 +250,9 @@ def find_product_by_name(seller, name):
 GET_PRODUCT_PERFORMANCE_DEFINITION = {
     "name": "get_product_performance",
     "description": (
-        "Get a single product's performance: current stock, price, active status, "
-        "total units sold, and total revenue generated. Use this when the seller "
-        "asks how a specific product is doing - resolve the product's ID with "
-        "find_product_by_name first if you only have its name."
+        "A product's performance: stock, price, active status, units sold, revenue. "
+        "Use when asked how a specific product is doing - resolve its ID with "
+        "find_product_by_name first if you only have the name."
     ),
     "input_schema": {
         "type": "object",
@@ -301,10 +287,9 @@ def get_product_performance(seller, product_id):
 GET_STOCK_FORECAST_DEFINITION = {
     "name": "get_stock_forecast",
     "description": (
-        "Estimate how many days until a product runs out of stock, based on its "
-        "recent sales velocity. Use this for questions like 'when will X run out' or "
-        "'do I need to restock X soon' - resolve the product's ID with "
-        "find_product_by_name first if you only have its name."
+        "Estimate days until a product runs out of stock, from recent sales velocity. "
+        "Use for 'when will X run out' / 'do I need to restock X soon' - resolve its ID "
+        "with find_product_by_name first if you only have the name."
     ),
     "input_schema": {
         "type": "object",
@@ -347,10 +332,7 @@ def get_stock_forecast(seller, product_id, days=30):
 
 GENERATE_DESCRIPTION_DEFINITION = {
     "name": "generate_product_description",
-    "description": (
-        "Generate an AI-written product description for one of this seller's products. "
-        "Returns the generated title, bullets, keywords, and description."
-    ),
+    "description": "Generate an AI product description (title, bullets, keywords, description) for one of this seller's products.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -383,10 +365,7 @@ def generate_product_description(seller, product_id):
 
 SEARCH_SIMILAR_DEFINITION = {
     "name": "search_similar_products",
-    "description": (
-        "Search the full product catalog for listings similar to a query. "
-        "Useful for finding competing or complementary products on the platform."
-    ),
+    "description": "Search the full catalog for listings similar to a query - competing or complementary products.",
     "input_schema": {
         "type": "object",
         "properties": {

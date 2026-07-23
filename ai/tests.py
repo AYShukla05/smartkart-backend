@@ -1574,6 +1574,136 @@ class ConfirmSellerActionViewTests(TestCase):
         self.assertEqual(second.status_code, 429)
 
 
+class RecordSellerActionOutcomesViewTests(TestCase):
+    """Purely informational endpoint - no Product interaction, just closing
+    the gap that let the seller assistant tell sellers stale information
+    about their own products after a confirm/cancel (see the propose ->
+    confirm loop this feeds back into)."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.seller = User.objects.create_user(
+            email="seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.other_seller = User.objects.create_user(
+            email="other-seller@test.com", password="testpass123", role="SELLER"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer@test.com", password="testpass123", role="BUYER"
+        )
+        self.conversation = Conversation.objects.create(user=self.seller)
+        self.url = "/api/ai/seller-assistant/record-outcomes/"
+
+    def _auth_as(self, user):
+        token = RefreshToken.for_user(user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token.access_token}")
+
+    def _payload(self, **overrides):
+        payload = {
+            "conversation_id": self.conversation.id,
+            "outcomes": [
+                {"product_name": "Widget", "field": "price", "status": "confirmed", "new_value": "24.99"},
+            ],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_buyer_request_returns_403(self):
+        self._auth_as(self.buyer)
+        response = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_missing_conversation_id_returns_400(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(conversation_id=None), format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_empty_outcomes_list_returns_400(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(outcomes=[]), format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_conversation_belonging_to_different_seller_returns_404(self):
+        self._auth_as(self.other_seller)
+        response = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_unknown_conversation_id_returns_404(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(conversation_id=999999), format="json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_confirmed_outcome_persists_message_with_new_value(self):
+        self._auth_as(self.seller)
+        response = self.client.post(self.url, self._payload(), format="json")
+
+        self.assertEqual(response.status_code, 200)
+        message = self.conversation.messages.get()
+        self.assertEqual(message.role, Message.ROLE_ASSISTANT)
+        self.assertIn("Widget's price is now 24.99", message.content)
+
+    def test_cancelled_outcome_persists_message_noting_cancellation(self):
+        self._auth_as(self.seller)
+        payload = self._payload(outcomes=[
+            {"product_name": "Widget", "field": "stock", "status": "cancelled"},
+        ])
+        self.client.post(self.url, payload, format="json")
+
+        message = self.conversation.messages.get()
+        self.assertIn("Widget's stock change was not applied", message.content)
+        self.assertIn("cancelled", message.content)
+
+    def test_mixed_outcomes_persist_as_one_combined_message(self):
+        self._auth_as(self.seller)
+        payload = self._payload(outcomes=[
+            {"product_name": "Widget", "field": "price", "status": "confirmed", "new_value": "24.99"},
+            {"product_name": "Widget", "field": "stock", "status": "cancelled"},
+        ])
+        self.client.post(self.url, payload, format="json")
+
+        # One turn's worth of proposals -> exactly one Message, not one per outcome.
+        self.assertEqual(self.conversation.messages.count(), 1)
+        message = self.conversation.messages.get()
+        self.assertIn("Widget's price is now 24.99", message.content)
+        self.assertIn("Widget's stock change was not applied", message.content)
+
+    def test_create_product_confirmed_outcome_uses_created_wording(self):
+        self._auth_as(self.seller)
+        payload = self._payload(outcomes=[
+            {"product_name": "Steel Kettle", "field": "listing", "status": "confirmed", "new_value": "created"},
+        ])
+        self.client.post(self.url, payload, format="json")
+
+        message = self.conversation.messages.get()
+        self.assertEqual(message.content, "Steel Kettle was created.")
+
+    def test_create_product_cancelled_outcome_uses_not_created_wording(self):
+        self._auth_as(self.seller)
+        payload = self._payload(outcomes=[
+            {"product_name": "Steel Kettle", "field": "listing", "status": "cancelled"},
+        ])
+        self.client.post(self.url, payload, format="json")
+
+        message = self.conversation.messages.get()
+        self.assertIn("Steel Kettle", message.content)
+        self.assertIn("was not created", message.content)
+
+    @patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"ai_seller_action": "1/minute"})
+    def test_throttle_returns_429_when_scope_limit_exceeded(self):
+        self._auth_as(self.seller)
+
+        first = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(self.url, self._payload(), format="json")
+        self.assertEqual(second.status_code, 429)
+
+
 class BuyerToolsTests(TestCase):
     """Ownership scoping is a query-level guarantee, not a prompt instruction -
     these test the executors directly, independent of the tool-calling loop."""

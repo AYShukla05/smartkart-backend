@@ -238,6 +238,58 @@ class ConfirmSellerActionView(APIView):
         return Response({"success": True, **result})
 
 
+def _describe_outcome(outcome):
+    product_name = outcome.get("product_name", "")
+    field = outcome.get("field", "")
+    if outcome.get("status") == "confirmed":
+        if field == "listing":
+            return f"{product_name} was created."
+        return f"{product_name}'s {field} is now {outcome.get('new_value')}."
+    if field == "listing":
+        return f"The proposed new listing '{product_name}' was not created (cancelled)."
+    return f"{product_name}'s {field} change was not applied (cancelled)."
+
+
+class RecordSellerActionOutcomesView(APIView):
+    """Purely informational - no mutation happens here (that already ran,
+    per-action, through ConfirmSellerActionView). This exists to close the
+    gap that caused stale answers: confirming a proposal never told the
+    conversation history what actually happened, so the model could only
+    ever "remember" proposing a change, never that it was confirmed or
+    cancelled. The frontend calls this once per batch of proposals - after
+    every card from one turn is resolved, not on each individual click -
+    so a turn with two proposals writes one consolidated message, not two.
+    """
+    permission_classes = [IsSeller]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_seller_action"
+
+    def post(self, request):
+        conversation_id = request.data.get("conversation_id")
+        outcomes = request.data.get("outcomes")
+
+        if not conversation_id or not isinstance(outcomes, list) or not outcomes:
+            return Response(
+                {"detail": "conversation_id and a non-empty outcomes list are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            conversation = Conversation.objects.get(id=conversation_id, user=request.user)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        summary = " ".join(_describe_outcome(outcome) for outcome in outcomes)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.ROLE_ASSISTANT,
+            content=summary,
+        )
+
+        return Response({"success": True})
+
+
 class BuyerOrderAssistantView(APIView):
     permission_classes = [IsBuyer]
     throttle_classes = [ScopedRateThrottle]

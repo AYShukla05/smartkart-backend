@@ -1236,6 +1236,148 @@ class SellerAssistantViewTests(TestCase):
         second = self.client.post(self.url, {"question": "hi"}, format="json")
         self.assertEqual(second.status_code, 429)
 
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_first_question_creates_conversation_owned_by_seller(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Sure!")])
+        self._auth_as(self.seller)
+
+        response = self.client.post(self.url, {"question": "hi"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        conversation = Conversation.objects.get(id=response.data["conversation_id"])
+        self.assertEqual(conversation.user, self.seller)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_user_and_assistant_messages_are_persisted(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Sure!")])
+        self._auth_as(self.seller)
+
+        response = self.client.post(self.url, {"question": "hi"}, format="json")
+
+        conversation = Conversation.objects.get(id=response.data["conversation_id"])
+        roles_and_content = [(m.role, m.content) for m in conversation.messages.all()]
+        self.assertEqual(
+            roles_and_content,
+            [(Message.ROLE_USER, "hi"), (Message.ROLE_ASSISTANT, "Sure!")],
+        )
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_second_question_reuses_conversation_and_history_is_not_duplicated(self, mock_call):
+        mock_call.side_effect = [
+            _tool_response([_text_block("Which product?")]),
+            _tool_response([_text_block("It's priced at $20.")]),
+        ]
+        self._auth_as(self.seller)
+
+        first = self.client.post(self.url, {"question": "what's the price of my top seller?"}, format="json")
+        conversation_id = first.data["conversation_id"]
+
+        second = self.client.post(
+            self.url, {"question": "Classic HDMI Cable", "conversation_id": conversation_id}, format="json",
+        )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["conversation_id"], conversation_id)
+
+        # Regression guard: prior exchange appears exactly once, immediately
+        # followed by the new prompt - not duplicated (see BuyerOrderAssistantViewTests).
+        second_call_messages = mock_call.call_args_list[1].args[0]
+        self.assertEqual(
+            second_call_messages,
+            [
+                {"role": "user", "content": "what's the price of my top seller?"},
+                {"role": "assistant", "content": "Which product?"},
+                {"role": "user", "content": "Classic HDMI Cable"},
+            ],
+        )
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_conversation_belonging_to_different_seller_returns_404(self, mock_call):
+        other_seller = User.objects.create_user(
+            email="other-seller@test.com", password="testpass123", role="SELLER"
+        )
+        mock_call.return_value = _tool_response([_text_block("Sure!")])
+        self._auth_as(self.seller)
+        first = self.client.post(self.url, {"question": "hi"}, format="json")
+        conversation_id = first.data["conversation_id"]
+
+        self._auth_as(other_seller)
+        response = self.client.post(
+            self.url, {"question": "hi again", "conversation_id": conversation_id}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_unknown_conversation_id_returns_404(self):
+        self._auth_as(self.seller)
+        response = self.client.post(
+            self.url, {"question": "hi", "conversation_id": 999999}, format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_conversation_remembers_the_product_a_tool_call_touched(self, mock_call):
+        category = Category.objects.create(name="Kitchen", slug="kitchen")
+        product = Product.objects.create(
+            seller=self.seller, category=category, name="Widget",
+            price=Decimal("10.00"), stock=5,
+        )
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_product_performance", {"product_id": product.id})]),
+            _tool_response([_text_block("Widget has 5 in stock.")]),
+        ]
+        self._auth_as(self.seller)
+
+        response = self.client.post(self.url, {"question": "how's Widget doing?"}, format="json")
+
+        conversation = Conversation.objects.get(id=response.data["conversation_id"])
+        self.assertEqual(conversation.last_product_id, product.id)
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_cached_product_is_hinted_on_the_next_turn_but_not_persisted_to_the_message(self, mock_call):
+        category = Category.objects.create(name="Kitchen", slug="kitchen")
+        product = Product.objects.create(
+            seller=self.seller, category=category, name="Widget",
+            price=Decimal("10.00"), stock=5,
+        )
+        mock_call.side_effect = [
+            _tool_response([_tool_use_block("get_product_performance", {"product_id": product.id})]),
+            _tool_response([_text_block("Widget has 5 in stock.")]),
+            _tool_response([_text_block("Widget is priced at $10.00.")]),
+        ]
+        self._auth_as(self.seller)
+
+        first = self.client.post(self.url, {"question": "how's Widget doing?"}, format="json")
+        conversation_id = first.data["conversation_id"]
+
+        second = self.client.post(
+            self.url, {"question": "what's the price?", "conversation_id": conversation_id}, format="json",
+        )
+
+        self.assertEqual(second.status_code, 200)
+        # First request consumed 2 side_effect entries (tool_use, then text);
+        # the second request's call is the 3rd overall.
+        second_call_prompt = mock_call.call_args_list[2].args[0][-1]["content"]
+        self.assertIn("Widget", second_call_prompt)
+        self.assertIn(str(product.id), second_call_prompt)
+        self.assertIn("what's the price?", second_call_prompt)
+
+        # The hint is only ever sent to the model - the persisted Message
+        # keeps the seller's original text unchanged.
+        conversation = Conversation.objects.get(id=conversation_id)
+        last_user_message = conversation.messages.filter(role=Message.ROLE_USER).last()
+        self.assertEqual(last_user_message.content, "what's the price?")
+
+    @patch("ai.services.tool_runner.call_with_tools")
+    def test_no_hint_is_added_when_nothing_is_cached_yet(self, mock_call):
+        mock_call.return_value = _tool_response([_text_block("Sure!")])
+        self._auth_as(self.seller)
+
+        self.client.post(self.url, {"question": "hi"}, format="json")
+
+        sent_prompt = mock_call.call_args.args[0][-1]["content"]
+        self.assertEqual(sent_prompt, "hi")
+
 
 class ConfirmSellerActionViewTests(TestCase):
     def setUp(self):

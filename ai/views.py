@@ -102,6 +102,29 @@ class GenerateDescriptionView(APIView):
         yield "data: [DONE]\n\n"
 
 
+def _with_last_product_hint(question, conversation):
+    """Prepend a note naming the product a tool last operated on in this
+    conversation, if any - so a follow-up like "what's the price now?" can
+    skip re-resolving a product already established, instead of relying on
+    the model to notice the reference itself or paying for another
+    find_product_by_name round trip. Never persisted - this is added to the
+    prompt sent to the model only; the Message row stores the seller's
+    original text unchanged.
+    """
+    if not conversation.last_product_id:
+        return question
+    try:
+        product_name = conversation.last_product.name
+    except Product.DoesNotExist:
+        return question
+    return (
+        f"<context>The most recently discussed product is \"{product_name}\" "
+        f"(product_id {conversation.last_product_id}). If this message doesn't "
+        f"name a different product, assume it refers to this one.</context>\n\n"
+        f"{question}"
+    )
+
+
 class SellerAssistantView(APIView):
     permission_classes = [IsSeller]
     throttle_classes = [ScopedRateThrottle]
@@ -109,22 +132,65 @@ class SellerAssistantView(APIView):
 
     def post(self, request):
         question = str(request.data.get("question", "")).strip()
+        conversation_id = request.data.get("conversation_id")
+
         if not question:
             return Response(
                 {"detail": "question is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if conversation_id:
+            try:
+                conversation = Conversation.objects.get(
+                    id=conversation_id,
+                    user=request.user,  # ownership enforced here
+                )
+            except Conversation.DoesNotExist:
+                return Response(
+                    {"detail": "Conversation not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            conversation = Conversation.objects.create(user=request.user)
+
+        # Built from messages already in the DB, before this turn's user
+        # message is persisted below - see BuyerOrderAssistantView for why
+        # the ordering matters (avoids sending the current message twice).
+        history = build_message_history(conversation)
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.ROLE_USER,
+            content=question,
+        )
+
         reply = run_with_tools(
-            prompt=question,
+            prompt=_with_last_product_hint(question, conversation),
             system=SELLER_ASSISTANT_SYSTEM_PROMPT,
             tool_definitions=SELLER_ASSISTANT_TOOL_DEFINITIONS,
             tool_executors=SELLER_ASSISTANT_TOOL_EXECUTORS,
-            seller=request.user,
+            actor=request.user,
             max_tool_calls=5,
             proposal_tool_names=PROPOSAL_TOOL_NAMES,
+            prior_messages=history,
         )
-        return Response({"response": reply.text, "pending_actions": reply.pending_actions})
+
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.ROLE_ASSISTANT,
+            content=reply.text,
+        )
+
+        if reply.last_product_id and reply.last_product_id != conversation.last_product_id:
+            conversation.last_product_id = reply.last_product_id
+            conversation.save(update_fields=["last_product_id"])
+
+        return Response({
+            "response": reply.text,
+            "pending_actions": reply.pending_actions,
+            "conversation_id": conversation.id,
+        })
 
 
 class ConfirmSellerActionView(APIView):

@@ -4,6 +4,8 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.utils import timezone
 
+from currency.services import CURRENCY_CHOICES
+
 from .managers import UserManager
 
 
@@ -23,6 +25,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     # email on save() rather than required at creation time.
     username = models.CharField(max_length=150, unique=True, null=True, blank=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES)
+    # Seller's own listing/settlement currency, set at registration. Unused
+    # server-side for buyers - their display currency is frontend/locale-only.
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default="INR", blank=True)
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

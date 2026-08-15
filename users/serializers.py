@@ -9,6 +9,7 @@ class CurrentUserSerializer(serializers.ModelSerializer):
             "id",
             "email",
             "role",
+            "currency",
             "is_active",
             "is_staff",
         ]

@@ -33,6 +33,7 @@ class RegisterView(APIView):
                 "user": {
                     "email": user.email,
                     "role": user.role,
+                    "currency": user.currency,
                 },
                 "tokens": {
                     "access": str(refresh.access_token),

@@ -40,6 +40,37 @@ class RegistrationTestCase(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["user"]["role"], "SELLER")
 
+    def test_register_seller_with_currency(self):
+        response = self.client.post(
+            "/api/auth/register/",
+            {
+                "email": "usdseller@test.com",
+                "password": "securepass123",
+                "role": "SELLER",
+                "currency": "USD",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["user"]["currency"], "USD")
+
+        user = User.objects.get(email="usdseller@test.com")
+        self.assertEqual(user.currency, "USD")
+
+    def test_register_without_currency_defaults_to_inr(self):
+        response = self.client.post(
+            "/api/auth/register/",
+            {
+                "email": "defaultseller@test.com",
+                "password": "securepass123",
+                "role": "SELLER",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["user"]["currency"], "INR")
+
+        user = User.objects.get(email="defaultseller@test.com")
+        self.assertEqual(user.currency, "INR")
+
     def test_register_duplicate_email(self):
         User.objects.create_user(
             email="existing@test.com", password="testpass123", role="BUYER"

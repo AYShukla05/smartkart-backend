@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     "orders",
     "seeding",
     "ai",
+    "currency",
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -173,6 +174,7 @@ REST_FRAMEWORK = {
         "ai_seller_assistant": "5/minute",
         "ai_seller_action": "20/minute",
         "ai_order_assistant": "10/minute",
+        "currency_rates": "30/minute",
     },
 }
 

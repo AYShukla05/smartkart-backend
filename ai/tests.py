@@ -24,7 +24,13 @@ from ai.services.context import build_message_history
 from ai.services.llm_client import CURRENT_EMBEDDING_MODEL_ID, LLMGenerationError
 from ai.services.search import MINIMUM_FLOOR, RELEVANCE_THRESHOLD, _select_candidates, semantic_search
 from ai.services.tool_runner import GENERATION_FAILED_MESSAGE, MAX_TOOL_CALLS_REACHED_MESSAGE, run_with_tools
-from ai.tools.buyer_tools import get_my_orders, get_order_detail
+from ai.tools.buyer_tools import (
+    BUYER_TOOL_DEFINITIONS,
+    BUYER_TOOL_EXECUTORS,
+    convert_price,
+    get_my_orders,
+    get_order_detail,
+)
 from ai.tools.seller_actions import execute_create_product, propose_create_product
 from ai.tools.seller_tools import (
     find_product_by_name,
@@ -1786,6 +1792,35 @@ class BuyerToolsTests(TestCase):
 
         with self.assertRaises(Order.DoesNotExist):
             get_order_detail(self.buyer, order.id)
+
+    @patch("ai.tools.buyer_tools.get_rates")
+    def test_convert_price_returns_converted_amount(self, mock_get_rates):
+        mock_get_rates.return_value = {
+            "base": "INR", "rates": {"INR": 1.0, "USD": 0.012}, "is_fallback": False,
+        }
+
+        result = convert_price(self.buyer, amount=1000, source_currency="inr", target_currency="usd")
+
+        self.assertEqual(result["converted_amount"], "12.00")
+        self.assertEqual(result["target_currency"], "USD")
+        self.assertEqual(result["source_currency"], "INR")
+        self.assertFalse(result["is_fallback_rate"])
+
+    @patch("ai.tools.buyer_tools.get_rates")
+    def test_convert_price_unsupported_currency_returns_error_dict_not_exception(self, mock_get_rates):
+        mock_get_rates.return_value = {
+            "base": "INR", "rates": {"INR": 1.0, "USD": 0.012}, "is_fallback": False,
+        }
+
+        result = convert_price(self.buyer, amount=1000, source_currency="INR", target_currency="XYZ")
+
+        self.assertIn("error", result)
+        self.assertIn("supported_currencies", result)
+
+    def test_convert_price_registered_in_buyer_tool_definitions_and_executors(self):
+        names = {d["name"] for d in BUYER_TOOL_DEFINITIONS}
+        self.assertIn("convert_price", names)
+        self.assertIs(BUYER_TOOL_EXECUTORS["convert_price"], convert_price)
 
 
 class ConversationModelTests(TestCase):

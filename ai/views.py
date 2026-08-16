@@ -65,7 +65,7 @@ class GenerateDescriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        prompt = build_description_prompt(name, category, price, additional_details)
+        prompt = build_description_prompt(name, category, price, additional_details, currency=request.user.currency)
         return StreamingHttpResponse(
             self._event_stream(prompt),
             content_type="text/event-stream",

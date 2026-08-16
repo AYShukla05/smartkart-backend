@@ -170,6 +170,7 @@ def propose_price_update(seller, product_id, new_price):
         "field": "price",
         "current_value": str(product.price),
         "new_value": str(new_price_decimal),
+        "currency": seller.currency,
     }
 
 
@@ -202,9 +203,10 @@ def propose_create_product(seller, name, category, price, stock):
         "action": "create_product",
         "product_id": None,
         "product_name": validated["name"],
-        "summary": f"{category_obj.name} · ${validated['price']} · {validated['stock']} in stock",
+        "summary": f"{category_obj.name} · {validated['price']} {seller.currency} · {validated['stock']} in stock",
         "category_id": category_obj.id,
         "price": str(validated["price"]),
+        "currency": seller.currency,
         "stock": validated["stock"],
     }
 
@@ -249,7 +251,13 @@ def execute_price_update(seller, product_id, new_value):
 
     product.price = new_price_decimal
     product.save(update_fields=["price"])
-    return {"product_id": product.id, "product_name": product.name, "field": "price", "new_value": str(product.price)}
+    return {
+        "product_id": product.id,
+        "product_name": product.name,
+        "field": "price",
+        "new_value": str(product.price),
+        "currency": seller.currency,
+    }
 
 
 def execute_toggle_product_active(seller, product_id, new_value):

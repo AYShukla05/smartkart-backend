@@ -88,7 +88,9 @@ class Command(BaseCommand):
                 time.sleep(BATCH_SLEEP_SECONDS)
 
     def _generate_and_save(self, product):
-        prompt = build_description_prompt(product.name, product.category.name, product.price)
+        prompt = build_description_prompt(
+            product.name, product.category.name, product.price, currency=product.seller.currency
+        )
         raw = generate(prompt, system=DESCRIPTION_SYSTEM_PROMPT, model=MODEL)
         parsed = parse_description_json(raw)
         product.description = parsed["description"]

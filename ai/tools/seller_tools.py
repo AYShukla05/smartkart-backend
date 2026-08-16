@@ -38,6 +38,7 @@ def get_seller_stats(seller, days=None):
         "total_revenue": str(stats["total_revenue"] or 0),
         "total_products": total_products,
         "period": f"last {days} days" if days else "all time",
+        "currency": seller.currency,
     }
 
 
@@ -81,6 +82,7 @@ def get_top_selling_products(seller, limit=5, days=None):
             "name": r["product__name"],
             "total_quantity_sold": r["total_quantity_sold"],
             "total_revenue": str(r["total_revenue"]),
+            "currency": seller.currency,
         }
         for r in results
     ]
@@ -123,6 +125,7 @@ def get_category_breakdown(seller, days=None):
             "category": r["product__category__name"],
             "total_quantity_sold": r["total_quantity_sold"],
             "total_revenue": str(r["total_revenue"]),
+            "currency": seller.currency,
         }
         for r in results
     ]
@@ -160,6 +163,7 @@ def get_recent_orders(seller, limit=10):
             "product_name": item.product.name,
             "quantity": item.quantity,
             "price_at_purchase": str(item.price_at_purchase),
+            "currency": item.currency,
             "status": item.order.status,
             "created_at": item.order.created_at.isoformat(),
         }
@@ -189,7 +193,7 @@ def get_low_stock_products(seller, threshold=10):
         stock__lte=threshold,
         is_active=True,
     ).values("id", "name", "stock", "price")
-    return list(products)
+    return [{**p, "currency": seller.currency} for p in products]
 
 
 GET_LOWEST_STOCK_PRODUCTS_DEFINITION = {
@@ -216,7 +220,7 @@ def get_lowest_stock_products(seller, limit=5):
         seller=seller,
         is_active=True,
     ).order_by("stock").values("id", "name", "stock", "price")[:limit]
-    return list(products)
+    return [{**p, "currency": seller.currency} for p in products]
 
 
 FIND_PRODUCT_BY_NAME_DEFINITION = {
@@ -244,7 +248,7 @@ def find_product_by_name(seller, name):
         seller=seller,
         name__icontains=name,
     ).order_by("name").values("id", "name", "stock", "price")[:10]
-    return list(products)
+    return [{**p, "currency": seller.currency} for p in products]
 
 
 GET_PRODUCT_PERFORMANCE_DEFINITION = {
@@ -279,6 +283,7 @@ def get_product_performance(seller, product_id):
         "is_active": product.is_active,
         "current_stock": product.stock,
         "price": str(product.price),
+        "currency": seller.currency,
         "total_quantity_sold": stats["total_quantity_sold"] or 0,
         "total_revenue": str(stats["total_revenue"] or 0),
     }
@@ -358,6 +363,7 @@ def generate_product_description(seller, product_id):
         name=product.name,
         category=product.category.name,
         price=str(product.price),
+        currency=seller.currency,
     )
     raw = generate(prompt=prompt, system=DESCRIPTION_SYSTEM_PROMPT)
     return parse_description_json(raw)
@@ -385,11 +391,17 @@ SEARCH_SIMILAR_DEFINITION = {
 
 
 def search_similar_products(seller, query, limit=5):
-    # Not seller-scoped by design - searches the full public catalog.
+    # Not seller-scoped by design - searches the full public catalog, which
+    # can span multiple sellers/currencies, so currency is per-row here
+    # rather than a single account-level value.
+    from django.db.models import F
+
     from ai.services.search import semantic_search
 
     queryset, is_fallback, confident_count = semantic_search(query=query)
-    results = queryset.values("id", "name", "category__name", "price")[:limit]
+    results = queryset.values(
+        "id", "name", "category__name", "price", currency=F("seller__currency")
+    )[:limit]
     return {
         "results": list(results),
         "is_fallback": is_fallback,

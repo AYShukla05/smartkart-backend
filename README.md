@@ -30,6 +30,7 @@ A multi-vendor e-commerce REST API where sellers list products and buyers browse
 - **Four AI features that build on each other**, not four disconnected demos: streamed description generation feeds the embeddings behind semantic search, which the seller and buyer assistants both call as a tool
 - **AI mutations can never bypass a human**: the model only ever *proposes* a change; a separate, LLM-unreachable endpoint independently re-validates ownership and current state before writing anything
 - **167 backend tests, 41 frontend tests, all passing** - plus LLM cost measured with Anthropic's `count_tokens` API rather than estimated (`docs/ai-costing.md`)
+- **Live multi-currency checkout** - each seller lists in their own currency; checkout converts every line to INR via a cached, rate-limited exchange-rate service before summing, so a single order can span sellers billing in different currencies without the total drifting
 
 ---
 
@@ -42,6 +43,8 @@ SmartKart is a marketplace backend that supports three user roles:
 - **Admins** manage product categories
 
 A single order can contain products from multiple sellers. Each seller only sees the portion of the order relevant to them.
+
+Sellers pick a listing currency once at registration (`INR`, `USD`, `EUR`, `GBP`, `JPY`, `AUD`, `CAD`, `CNY`); every price they set is in that currency. Buyers see live-converted totals regardless of how many sellers - and currencies - an order touches.
 
 ---
 
@@ -94,6 +97,13 @@ The checkout endpoint wraps the entire flow in `transaction.atomic()` and uses `
 
 ### Price captured at purchase time
 `OrderItem` stores `price_at_purchase` rather than referencing the product's current price. This ensures order history remains accurate even if a seller changes their prices later.
+
+### INR-pivot currency conversion, fetched once outside the lock
+The `currency` app (`services.py`) fetches INR-based rates from Frankfurter (ECB data, no API key), caches them for 24h, and falls back to a hardcoded rate table if the live fetch ever fails - `get_rates()` never raises. `convert()`/`to_inr()` do the actual math in `Decimal`, not `float`, since the result feeds `Order.total_amount`.
+
+Checkout calls `get_rates()` once, before entering the `select_for_update()` transaction, so a currency-API round trip never sits inside the row lock. Each cart line is converted from the seller's currency to INR and summed; `OrderItem.currency` freezes the seller's currency at purchase time, same historical-accuracy guarantee `price_at_purchase` already provides - a later change to a seller's listing currency can't retroactively alter past orders.
+
+Currency is a seller-level property set once at registration, not per-product - a seller's whole catalog stays in one currency, so existing revenue aggregations (`Sum` over `price_at_purchase`) don't need to become currency-aware themselves.
 
 ### S3 presigned URL pipeline
 Instead of the backend receiving and forwarding image files (which consumes server memory and bandwidth), the flow is:
@@ -150,6 +160,7 @@ smartkart-backend/
 ├── products/            # Seller product CRUD, image management, S3 utilities
 ├── cart/                # Server-side buyer cart
 ├── orders/              # Checkout (atomic), buyer/seller order views, stats
+├── currency/            # Live exchange-rate service (Frankfurter, cached, INR-pivot), rates endpoint
 ├── ai/                  # Description generation, semantic search, seller & order assistants
 │   ├── services/        # llm_client (Anthropic), tool_runner (agentic loop), search, context (history)
 │   ├── tools/           # seller_tools, seller_actions (propose/execute), buyer_tools
@@ -173,6 +184,7 @@ Each app is self-contained with its own models, serializers, views, and URLs.
 | **Images** | `POST my/{id}/images/presign/`, `POST my/{id}/images/`, `DELETE` | Seller |
 | **Cart** | `GET /`, `POST items/`, `PATCH/DELETE items/{id}/` | Buyer |
 | **Orders** | `POST checkout/`, `GET /` (buyer history), `GET seller/` (seller orders), `GET seller/stats/` | Role-based |
+| **Currency** | `GET currency/rates/` (INR-pivot rates, live/fallback) | Public |
 | **AI** | `POST ai/generate-description/` (streaming), `POST ai/seller-assistant/`, `POST ai/seller-assistant/confirm-action/`, `POST ai/seller-assistant/record-outcomes/`, `POST ai/order-assistant/` | Seller / Buyer |
 
 Full interactive documentation at `/api/docs/`.
@@ -182,14 +194,14 @@ Full interactive documentation at `/api/docs/`.
 ## Data Model
 
 ```
-User (email, role: BUYER|SELLER, is_staff)
+User (email, role: BUYER|SELLER, is_staff, currency: seller's listing currency)
  ├── Product (seller FK) ──→ Category (FK, PROTECT)
  │    ├── ProductImage (image_url, is_thumbnail)
  │    └── ProductEmbedding (product 1:1, 512-dim vector, model_id)
  ├── Cart (buyer 1:1, created lazily)
  │    └── CartItem (product FK, quantity) [unique together: cart+product]
- ├── Order (buyer FK)
- │    └── OrderItem (product FK, seller FK, quantity, price_at_purchase)
+ ├── Order (buyer FK, total_amount: INR-settled)
+ │    └── OrderItem (product FK, seller FK, quantity, price_at_purchase, currency: seller's currency at purchase)
  └── Conversation (user FK, last_product FK nullable, shared by seller/buyer assistants)
       └── Message (conversation FK, role: user|assistant, content)
 ```

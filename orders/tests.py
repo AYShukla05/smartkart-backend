@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -125,6 +126,45 @@ class CheckoutTestCase(TestCase):
 
         sellers = set(order.items.values_list("seller_id", flat=True))
         self.assertEqual(sellers, {self.seller.id, seller2.id})
+
+    @patch("orders.views.get_rates")
+    def test_checkout_converts_non_inr_seller_items_to_inr_total(self, mock_get_rates):
+        mock_get_rates.return_value = {
+            "base": "INR",
+            "rates": {"INR": 1.0, "USD": 0.012},
+            "is_fallback": False,
+        }
+        usd_seller = User.objects.create_user(
+            email="usdseller@test.com", password="testpass123", role="SELLER", currency="USD"
+        )
+        usd_product = Product.objects.create(
+            seller=usd_seller,
+            category=self.category,
+            name="Imported Gadget",
+            price=Decimal("100.00"),  # $100
+            stock=5,
+        )
+        CartItem.objects.create(cart=self.cart, product=usd_product, quantity=1)
+
+        response = self.client.post("/api/orders/checkout/")
+        self.assertEqual(response.status_code, 201)
+
+        # INR item: 15000 * 2 = 30000. USD item: $100 -> INR at rate 0.012 -> 8333.33
+        expected_total = Decimal("30000.00") + Decimal("100.00") / Decimal("0.012")
+        expected_total = expected_total.quantize(Decimal("0.01"))
+        self.assertEqual(
+            Decimal(str(response.data["total_amount"])).quantize(Decimal("0.01")),
+            expected_total,
+        )
+
+        order = Order.objects.get(id=response.data["order_id"])
+        usd_item = order.items.get(product=usd_product)
+        # Native currency amount is preserved unconverted, currency frozen.
+        self.assertEqual(usd_item.price_at_purchase, Decimal("100.00"))
+        self.assertEqual(usd_item.currency, "USD")
+
+        inr_item = order.items.get(product=self.product)
+        self.assertEqual(inr_item.currency, "INR")
 
     def test_seller_cannot_checkout(self):
         token = RefreshToken.for_user(self.seller)

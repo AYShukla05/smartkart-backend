@@ -94,7 +94,7 @@ def semantic_search(query, category_id=None):
 
     queryset = Product.objects.filter(
         id__in=selected_ids
-    ).select_related("category").prefetch_related("images").annotate(
+    ).select_related("category", "seller").prefetch_related("images").annotate(
         distance=CosineDistance("embedding__embedding", query_vector)
     ).order_by("distance")
 

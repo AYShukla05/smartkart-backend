@@ -11,6 +11,7 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
             "product_name",
             "quantity",
             "price_at_purchase",
+            "currency",
         )
 
 

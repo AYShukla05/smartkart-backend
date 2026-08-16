@@ -20,6 +20,7 @@ class CartItemReadSerializer(serializers.ModelSerializer):
         decimal_places=2,
         read_only=True
     )
+    currency = serializers.CharField(source="product.seller.currency", read_only=True)
     thumbnail = serializers.SerializerMethodField()
 
     class Meta:
@@ -29,6 +30,7 @@ class CartItemReadSerializer(serializers.ModelSerializer):
             "product_id",
             "product_name",
             "price",
+            "currency",
             "quantity",
             "thumbnail",
         ]
@@ -45,6 +47,6 @@ class CartSerializer(serializers.Serializer):
 
     def get_items(self, obj):
         queryset = obj.items.select_related(
-            "product"
+            "product", "product__seller"
         ).prefetch_related("product__images")
         return CartItemReadSerializer(queryset, many=True).data

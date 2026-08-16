@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from cart.models import CartItem
+from currency.services import get_rates, to_inr
 from products.models import Product
 from users.permissions import IsAdmin, IsBuyer, IsSeller
 from smartkart.pagination import AdminOrderPagination, OrderPagination
@@ -27,12 +28,18 @@ class CheckoutView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Fetched once, outside the row-locked transaction below - cache-backed
+        # so this is cheap, and it keeps an external HTTP call out of the
+        # select_for_update() block.
+        rates = get_rates()
+
         with transaction.atomic():
             # Lock products to prevent race conditions
             product_ids = cart_items.values_list("product_id", flat=True)
             products = (
                 Product.objects
                 .select_for_update()
+                .select_related("seller")
                 .filter(id__in=product_ids, is_active=True)
             )
             product_map = {product.id: product for product in products}
@@ -57,13 +64,17 @@ class CheckoutView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-                total_amount += product.price * item.quantity
+                # total_amount is the platform's INR settlement figure - each
+                # item's native-currency price is converted before summing,
+                # since an order can span sellers with different currencies.
+                total_amount += to_inr(product.price, product.seller.currency, rates=rates) * item.quantity
 
                 order_items_data.append({
                     "product": product,
                     "seller": product.seller,
                     "quantity": item.quantity,
                     "price_at_purchase": product.price,
+                    "currency": product.seller.currency,
                 })
 
             if not order_items_data:
@@ -86,6 +97,7 @@ class CheckoutView(APIView):
                     seller=data["seller"],
                     quantity=data["quantity"],
                     price_at_purchase=data["price_at_purchase"],
+                    currency=data["currency"],
                 )
                 for data in order_items_data
             ])
@@ -212,4 +224,5 @@ class SellerStatsView(APIView):
             "total_orders": order_stats["total_orders"] or 0,
             "total_revenue": str(order_stats["total_revenue"] or 0),
             "total_products": total_products,
+            "currency": request.user.currency,
         })

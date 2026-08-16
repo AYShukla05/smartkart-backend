@@ -38,7 +38,7 @@ class SellerProductListCreateView(APIView):
     def get(self, request):
         queryset = Product.objects.filter(
             seller=request.user
-        ).select_related("category").prefetch_related("images")
+        ).select_related("category", "seller").prefetch_related("images")
 
         search = request.query_params.get("search", "").strip()
         if search:
@@ -71,7 +71,7 @@ class SellerProductDetailView(APIView):
 
     def get_object(self, request, pk):
         return get_object_or_404(
-            Product.objects.select_related("category").prefetch_related("images"),
+            Product.objects.select_related("category", "seller").prefetch_related("images"),
             pk=pk,
             seller=request.user,
         )
@@ -102,7 +102,7 @@ class PublicProductListView(APIView):
     def get(self, request):
         queryset = Product.objects.filter(
             is_active=True
-        ).select_related("category").prefetch_related("images")
+        ).select_related("category", "seller").prefetch_related("images")
 
         search = request.query_params.get("search", "").strip()
         category = request.query_params.get("category")
@@ -220,7 +220,7 @@ class PublicProductDetailView(APIView):
 
     def get(self, request, pk):
         product = get_object_or_404(
-            Product.objects.select_related("category").prefetch_related("images"),
+            Product.objects.select_related("category", "seller").prefetch_related("images"),
             pk=pk,
             is_active=True,
         )

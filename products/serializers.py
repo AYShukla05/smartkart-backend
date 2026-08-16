@@ -36,6 +36,9 @@ class ProductListSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     seller_id = serializers.IntegerField(source="seller.id", read_only=True)
     seller_username = serializers.CharField(source="seller.username", read_only=True)
+    # Derived from the seller, not stored per-product - a seller lists
+    # everything in one currency, set at registration.
+    currency = serializers.CharField(source="seller.currency", read_only=True)
     thumbnail = serializers.SerializerMethodField()
     distance = serializers.SerializerMethodField()
 
@@ -46,6 +49,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "name",
             "description",
             "price",
+            "currency",
             "stock",
             "is_active",
             "category",
@@ -94,6 +98,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     seller_id = serializers.IntegerField(source="seller.id", read_only=True)
     seller_username = serializers.CharField(source="seller.username", read_only=True)
+    currency = serializers.CharField(source="seller.currency", read_only=True)
     images = ProductImageCreateSerializer(many=True, read_only=True)
 
     class Meta:
@@ -104,6 +109,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             "description",
             "seo_keywords",
             "price",
+            "currency",
             "stock",
             "category",
             "category_name",
